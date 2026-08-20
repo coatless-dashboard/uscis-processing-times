@@ -359,3 +359,48 @@ table.dt td.prose { white-space: normal; min-width: 15rem; }
      in a control-only card it is just dead space under the inputs. */
   > .quarto-layout-panel { margin-bottom: 0; }
 }
+
+/* Quarto puts the theme toggle and the dashboard links in different navbar
+   containers, so by default they are different sizes and do not line up. These
+   give all three the same box and sit them together as one toolbar. */
+.navbar .navbar-container { align-items: center; }
+.navbar .quarto-dashboard-links { display: flex; align-items: center; gap: .15rem; }
+.navbar a.quarto-color-scheme-toggle { order: 99; }
+
+.navbar a.quarto-dashboard-link,
+.navbar a.quarto-color-scheme-toggle {
+  display: inline-flex; align-items: center; justify-content: center;
+  /* the toggle is a flex item in the navbar container and will otherwise
+     shrink to its glyph, so the width has to be pinned rather than suggested */
+  flex: 0 0 auto; width: 2rem; min-width: 2rem; height: 2rem; padding: 0; margin: 0;
+  border-radius: 6px; border-bottom: none !important;
+  color: var(--ink-2) !important; font-size: 1.05rem; line-height: 1;
+  transition: background .12s, color .12s;
+}
+.navbar a.quarto-dashboard-link:hover,
+.navbar a.quarto-color-scheme-toggle:hover {
+  background: var(--card-head); color: var(--c0) !important;
+}
+.navbar a.quarto-dashboard-link:focus-visible,
+.navbar a.quarto-color-scheme-toggle:focus-visible {
+  outline: 2px solid var(--c0); outline-offset: 1px;
+}
+.navbar a.quarto-dashboard-link .bi { font-size: inherit; }
+
+/* Quarto fills the theme-toggle icon near-white because it assumes a dark
+   navbar. This dashboard's navbar is the card colour, so the control was
+   invisible. These are Quarto's own icons, recoloured to the theme ink, at the
+   same specificity as its rules so the later definition wins. Base64 because
+   the SVG carries double quotes that would close the CSS url() early. */
+.navbar .quarto-color-scheme-toggle:not(.alternate) .bi::before {
+  background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgZmlsbD0iIzNDNDY1MCIgY2xhc3M9ImJpIGJpLXRvZ2dsZS1vZmYiIHZpZXdCb3g9IjAgMCAxNiAxNiI+PHBhdGggZD0iTTExIDRhNCA0IDAgMCAxIDAgOEg4YTQuOTkyIDQuOTkyIDAgMCAwIDItNCA0Ljk5MiA0Ljk5MiAwIDAgMC0yLTRoM3ptLTYgOGE0IDQgMCAxIDEgMC04IDQgNCAwIDAgMSAwIDh6TTAgOGE1IDUgMCAwIDAgNSA1aDZhNSA1IDAgMCAwIDAtMTBINWE1IDUgMCAwIDAtNSA1eiIvPjwvc3ZnPg==");
+}
+.navbar .quarto-color-scheme-toggle.alternate .bi::before {
+  background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgZmlsbD0iIzNDNDY1MCIgY2xhc3M9ImJpIGJpLXRvZ2dsZS1vbiIgdmlld0JveD0iMCAwIDE2IDE2Ij48cGF0aCBkPSJNNSAzYTUgNSAwIDAgMCAwIDEwaDZhNSA1IDAgMCAwIDAtMTBINXptNiA5YTQgNCAwIDEgMSAwLTggNCA0IDAgMCAxIDAgOHoiLz48L3N2Zz4=");
+}
+.navbar .quarto-color-scheme-toggle:not(.alternate):hover .bi::before {
+  background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgZmlsbD0iIzBFN0ZBOCIgY2xhc3M9ImJpIGJpLXRvZ2dsZS1vZmYiIHZpZXdCb3g9IjAgMCAxNiAxNiI+PHBhdGggZD0iTTExIDRhNCA0IDAgMCAxIDAgOEg4YTQuOTkyIDQuOTkyIDAgMCAwIDItNCA0Ljk5MiA0Ljk5MiAwIDAgMC0yLTRoM3ptLTYgOGE0IDQgMCAxIDEgMC04IDQgNCAwIDAgMSAwIDh6TTAgOGE1IDUgMCAwIDAgNSA1aDZhNSA1IDAgMCAwIDAtMTBINWE1IDUgMCAwIDAtNSA1eiIvPjwvc3ZnPg==");
+}
+.navbar .quarto-color-scheme-toggle.alternate:hover .bi::before {
+  background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgZmlsbD0iIzBFN0ZBOCIgY2xhc3M9ImJpIGJpLXRvZ2dsZS1vbiIgdmlld0JveD0iMCAwIDE2IDE2Ij48cGF0aCBkPSJNNSAzYTUgNSAwIDAgMCAwIDEwaDZhNSA1IDAgMCAwIDAtMTBINXptNiA5YTQgNCAwIDEgMSAwLTggNCA0IDAgMCAxIDAgOHoiLz48L3N2Zz4=");
+}

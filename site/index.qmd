@@ -8,6 +8,13 @@ format:
     theme:
       light: [cosmo, custom.scss]
       dark: [cosmo, custom.scss, dark.scss]
+    nav-buttons:
+      - icon: journal-text
+        href: https://blog.thecoatlessprofessor.com/programming/data/uscis-processing-times/
+        aria-label: Read the write-up
+      - icon: github
+        href: https://github.com/coatless-dashboard/uscis-processing-times
+        aria-label: Source on GitHub
 execute:
   echo: false
   warning: false
@@ -2256,13 +2263,13 @@ fitted((w, h) => rankChart(PRECROWS, {
 
 # Codebook
 
-## Row {height="8%"}
+## Row {height="10%"}
 
 ```{ojs}
 viewof pickTable = Inputs.radio(CB_TABLES, { label: "Table", value: CB_TABLES[0] })
 ```
 
-## Row {height="33%"}
+## Row {height="29%"}
 
 ```{ojs}
 //| title: "Variables"
@@ -2281,7 +2288,7 @@ viewof pickTable = Inputs.radio(CB_TABLES, { label: "Table", value: CB_TABLES[0]
 }
 ```
 
-## Row {height="58%"}
+## Row {height="61%"}
 
 ::: {.card title="About this table"}
 
