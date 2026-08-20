@@ -225,3 +225,44 @@ test_that("a first-ever run with an empty prior manifest proceeds without a loca
     file.copy(file.path(work, asset_name), dest, overwrite = TRUE); dest })
   expect_equal(res$status, "updated")
 })
+
+test_that("a chunk of older snapshots keeps every prior row instead of dropping them", {
+  state <- withr::local_tempdir(); out <- withr::local_tempdir()
+  work <- withr::local_tempdir()
+
+  # a panel that already holds a NEWER day
+  newer <- file.path(work, "2026-01-05.db"); make_fixture_db(newer)
+  a1 <- data.frame(tag = "2026-01-05", asset_name = "2026-01-05.db",
+                   size = file.size(newer), stringsAsFactors = FALSE)
+  r1 <- run_backfill(file.path(state, "w1"), a1, state,
+                     fetch_fn = function(tag, asset_name, dest) {
+                       file.copy(newer, dest, overwrite = TRUE); dest })
+  expect_equal(nrow(r1$tables$pt_snapshots[
+    as.Date(r1$tables$pt_snapshots$snapshot_date) == as.Date("2026-01-05"), ]) > 0, TRUE)
+
+  # now collect an OLDER day as a chunk
+  older <- file.path(work, "2025-12-01.db"); make_fixture_db(older)
+  a2 <- data.frame(tag = "2025-12-01", asset_name = "2025-12-01.db",
+                   size = file.size(older), stringsAsFactors = FALSE)
+  res <- run_backfill_chunk(state, a2, out,
+                            fetch_fn = function(tag, asset_name, dest) {
+                              file.copy(older, dest, overwrite = TRUE); dest })
+  expect_equal(res$status, "collected")
+  expect_equal(res$added, 1L)
+
+  con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out, "processing-times.db"))
+  days <- sort(unique(as.Date(DBI::dbReadTable(con, "pt_snapshots")$snapshot_date,
+                              origin = "1970-01-01")))
+  DBI::dbDisconnect(con)
+  # both days present: the older chunk did not evict the newer prior rows
+  expect_equal(as.character(days), c("2025-12-01", "2026-01-05"))
+})
+
+test_that("pending_tags returns the oldest missing tags, oldest first", {
+  prev <- list(snapshots = list("2026-01-03" = list(tag = "2026-01-03")))
+  all <- c("2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04")
+  expect_equal(pending_tags(all, prev, 2), c("2026-01-01", "2026-01-02"))
+  expect_equal(pending_tags(all, prev, 10), c("2026-01-01", "2026-01-02", "2026-01-04"))
+  expect_equal(length(pending_tags(all, list(snapshots = setNames(
+    lapply(all, function(t) list(tag = t)), all)), 5)), 0L)
+})

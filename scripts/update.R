@@ -93,3 +93,60 @@ run_update <- function(state_dir, assets, out_dir, fetch_fn = download_snapshot,
 
   list(status = "updated", rebuilt_from = from, warnings = warns)
 }
+
+# Collect the archive a chunk at a time.
+#
+# This is not run_update with a different anchor. The incremental path drops
+# every prior row from the rebuild anchor forward and re-fetches it, which is
+# correct when upstream re-cuts a day. A chunk is OLDER than everything already
+# held, so the opposite applies: every prior row must survive, and the derived
+# tables are rebuilt over the union. Dropping by date here would silently
+# discard the newer half of the panel on every chunk.
+run_backfill_chunk <- function(state_dir, assets, out_dir,
+                               fetch_fn = download_snapshot) {
+  manifest_path <- file.path(state_dir, "manifest.json")
+  prev <- if (file.exists(manifest_path)) {
+    jsonlite::read_json(manifest_path, simplifyVector = FALSE)
+  } else list(snapshots = list())
+
+  if (nrow(assets) == 0) {
+    return(list(status = "complete", added = 0L, warnings = character(0)))
+  }
+
+  panel_path <- file.path(state_dir, "processing-times.db")
+  prior_snapshots <- NULL; prior_offices <- NULL
+  if (file.exists(panel_path)) {
+    con <- DBI::dbConnect(RSQLite::SQLite(), panel_path)
+    prior_snapshots <- DBI::dbReadTable(con, "pt_snapshots")
+    prior_offices <- tryCatch(DBI::dbReadTable(con, "offices"), error = function(e) NULL)
+    DBI::dbDisconnect(con)
+    prior_snapshots$snapshot_date        <- as.Date(prior_snapshots$snapshot_date,        origin = "1970-01-01")
+    prior_snapshots$publication_date     <- as.Date(prior_snapshots$publication_date,     origin = "1970-01-01")
+    prior_snapshots$service_request_date <- as.Date(prior_snapshots$service_request_date, origin = "1970-01-01")
+    prior_snapshots$range_valid          <- as.logical(prior_snapshots$range_valid)
+    if (!is.null(prior_offices) && nrow(prior_offices)) {
+      prior_offices$first_seen <- as.Date(prior_offices$first_seen, origin = "1970-01-01")
+      prior_offices$last_seen  <- as.Date(prior_offices$last_seen,  origin = "1970-01-01")
+    }
+  } else if (length(prev$snapshots)) {
+    stop("manifest records ", length(prev$snapshots), " prior snapshot(s) but no ",
+         "panel file was found at ", panel_path,
+         " -- refusing to rebuild and publish a truncated panel", call. = FALSE)
+  }
+
+  res <- run_backfill(work_dir = file.path(state_dir, "work"),
+                      assets = assets, out_dir = out_dir, fetch_fn = fetch_fn,
+                      prior_snapshots = prior_snapshots, prior_offices = prior_offices,
+                      prior_manifest = prev)
+
+  warns <- character(0)
+  for (tag in names(res$manifest$snapshots)) {
+    st <- res$manifest$snapshots[[tag]]
+    if (!identical(st$status, "ok")) {
+      warns <- c(warns, sprintf("quarantined %s (%s)", tag, st$reason))
+    }
+  }
+  list(status = "collected", added = nrow(assets),
+       span = range(as.Date(assets$tag)),
+       total = length(res$manifest$snapshots), warnings = warns)
+}

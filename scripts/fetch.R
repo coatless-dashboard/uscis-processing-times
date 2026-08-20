@@ -61,6 +61,49 @@ list_release_assets <- function(repo = SOURCE_RELEASES_REPO, gh_fn = NULL,
   out[is_date_tag, , drop = FALSE]
 }
 
+# The releases endpoint stops at 1000 rows, but the tags endpoint does not, and
+# a release can be fetched directly by tag. Together those let the archive be
+# collected in chunks however deep it goes, without ever listing all releases.
+list_all_tags <- function(repo = SOURCE_RELEASES_REPO, gh_fn = NULL,
+                          max_pages = 100L) {
+  if (is.null(gh_fn)) gh_fn <- function(endpoint, ...) gh::gh(endpoint, ...)
+  tags <- character(0)
+  for (page in seq_len(max_pages)) {
+    batch <- gh_fn(paste0("GET /repos/", repo, "/tags"),
+                   per_page = API_RELEASE_PAGE, page = page)
+    if (length(batch) == 0) break
+    tags <- c(tags, vapply(batch, function(t) t$name, character(1)))
+    if (length(batch) < API_RELEASE_PAGE) break
+  }
+  sort(unique(tags[grepl("^\\d{4}-\\d{2}-\\d{2}$", tags)]))
+}
+
+# One release, addressed by tag. Returns a zero-row frame when the tag has no
+# usable asset so a gap in the upstream degrades to "skip" rather than an error.
+assets_for_tags <- function(tags, repo = SOURCE_RELEASES_REPO, gh_fn = NULL) {
+  if (is.null(gh_fn)) gh_fn <- function(endpoint, ...) gh::gh(endpoint, ...)
+  rows <- lapply(tags, function(tg) {
+    r <- tryCatch(gh_fn(paste0("GET /repos/", repo, "/releases/tags/", tg)),
+                  error = function(e) NULL)
+    if (is.null(r) || length(r$assets) == 0) return(NULL)
+    a <- r$assets[[1]]
+    data.frame(tag = tg, asset_name = a$name, size = as.numeric(a$size),
+               stringsAsFactors = FALSE)
+  })
+  rows <- Filter(Negate(is.null), rows)
+  if (length(rows) == 0) {
+    return(data.frame(tag = character(0), asset_name = character(0),
+                      size = numeric(0), stringsAsFactors = FALSE))
+  }
+  do.call(rbind, rows)
+}
+
+# Oldest first, so the archive fills backwards from where it already reaches.
+pending_tags <- function(all_tags, prev, chunk_size) {
+  have <- if (is.null(prev$snapshots)) character(0) else names(prev$snapshots)
+  utils::head(sort(setdiff(all_tags, have)), chunk_size)
+}
+
 snapshot_url <- function(tag, asset_name, repo = SOURCE_RELEASES_REPO) {
   sprintf("https://github.com/%s/releases/download/%s/%s", repo, tag, asset_name)
 }
