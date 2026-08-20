@@ -1,9 +1,38 @@
 # scripts/fetch.R: release discovery, download, validation.
 
 # gh_fn is injected so the listing logic is testable without network access.
-list_release_assets <- function(repo = SOURCE_RELEASES_REPO, gh_fn = NULL) {
-  if (is.null(gh_fn)) gh_fn <- function(endpoint, ...) gh::gh(endpoint, ..., .limit = Inf)
-  releases <- gh_fn(paste0("GET /repos/", repo, "/releases"))
+#
+# The releases endpoint serves at most 1000 rows and returns a hard 422 on the
+# request that would cross that line, so asking for every release fails outright
+# once an archive passes 1000 of them. Pages are requested one at a time,
+# newest first, and the walk stops as soon as it reaches a tag already held.
+# A steady-state run therefore costs a single page, and a deeper archive
+# degrades to "the newest 1000" with a warning rather than an error.
+API_RELEASE_PAGE <- 100L
+API_RELEASE_MAX_PAGES <- 10L   # 10 * 100 = the 1000-row ceiling
+
+list_release_assets <- function(repo = SOURCE_RELEASES_REPO, gh_fn = NULL,
+                                known_tags = character(0)) {
+  if (is.null(gh_fn)) gh_fn <- function(endpoint, ...) gh::gh(endpoint, ...)
+  releases <- list()
+  hit_ceiling <- TRUE
+  for (page in seq_len(API_RELEASE_MAX_PAGES)) {
+    batch <- gh_fn(paste0("GET /repos/", repo, "/releases"),
+                   per_page = API_RELEASE_PAGE, page = page)
+    if (length(batch) == 0) { hit_ceiling <- FALSE; break }
+    releases <- c(releases, batch)
+    if (length(batch) < API_RELEASE_PAGE) { hit_ceiling <- FALSE; break }
+    # everything older than this is already accounted for
+    if (length(known_tags) &&
+        all(vapply(batch, function(r) r$tag_name %in% known_tags, logical(1)))) {
+      hit_ceiling <- FALSE; break
+    }
+  }
+  if (hit_ceiling) {
+    warning("release listing stopped at the API ceiling of ",
+            API_RELEASE_MAX_PAGES * API_RELEASE_PAGE, " releases; anything older ",
+            "than that cannot be listed and must already be in the panel")
+  }
 
   rows <- lapply(releases, function(r) {
     if (length(r$assets) == 0) return(NULL)

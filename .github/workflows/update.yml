@@ -65,7 +65,10 @@ jobs:
             for (f in c("config.R","normalize.R","extract.R","fetch.R","panel.R",
                         "derive.R","manifest.R","artifacts.R","checks.R",
                         "backfill.R","update.R")) source(file.path("scripts", f));
-            assets <- list_release_assets();
+            prior <- if (file.exists("state/manifest.json"))
+                       names(jsonlite::read_json("state/manifest.json",
+                             simplifyVector = FALSE)$snapshots) else character(0);
+            assets <- list_release_assets(known_tags = prior);
             force_full_rebuild <- identical(tolower(Sys.getenv("FORCE_FULL_REBUILD")), "true");
             res <- run_update("state", assets, "out", force_full_rebuild = force_full_rebuild);
             print(res);
