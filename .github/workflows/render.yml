@@ -2,16 +2,15 @@
 name: Render dashboard
 
 on:
-  # after a data update lands, so the site always reflects the newest panel
+  # keep the published dashboard in step with the data behind it
   workflow_run:
-    workflows: ["Update"]
+    workflows: [Update]
     types: [completed]
-  # editing the dashboard itself
+  # and with the dashboard's own source
   push:
     paths:
-      - "site/**"
-      - ".github/workflows/render.yml"
-  # and on demand
+      - site/**
+      - .github/workflows/render.yml
   workflow_dispatch:
 
 permissions:
@@ -25,21 +24,21 @@ concurrency:
 
 jobs:
   render:
-    # a failed data update should not publish a stale or half-built panel
-    if: >-
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
+    # a failed data update must not publish a half-built panel
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
       rendered: ${{ steps.panel.outputs.found }}
+
     steps:
       - uses: actions/checkout@v7
 
       - uses: r-lib/actions/setup-r@v2
         with:
-          r-version: "release"
+          r-version: release
           use-public-rspm: true
+
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           packages: |
@@ -49,62 +48,68 @@ jobs:
             any::tidyr
             any::ggplot2
             any::htmltools
+
       - uses: quarto-dev/quarto-actions/setup@v2
 
-      # Until the update workflow has run once there is no panel to render.
-      # That is a precondition, not a fault, so report it and stop rather than
+      # Until Update has run once there is no panel to read. That is a
+      # precondition rather than a fault, so say so and stop, instead of
       # failing the run and leaving a red badge on a healthy repository.
       - name: Fetch the published panel
         id: panel
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -uo pipefail
           mkdir -p panel
-          if gh release download current --pattern "processing-times.db" --dir panel 2>/dev/null; then
+          if gh release download current --pattern processing-times.db --dir panel; then
             echo "found=true" >> "$GITHUB_OUTPUT"
             ls -lh panel/
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Nothing to render::No panel has been published yet. Run the Update workflow first; it creates the rolling current release this job reads."
+            echo "::notice title=Nothing to render::No panel has been published yet. Run the Update workflow first; it creates the rolling 'current' release this job reads."
           fi
 
       - name: Render
         if: steps.panel.outputs.found == 'true'
         env:
-          # the panel carries the office dimension, so nothing else is needed
           USCIS_PANEL: ${{ github.workspace }}/panel/processing-times.db
         run: quarto render site/index.qmd --to dashboard
 
-      - name: Fail if the build produced an empty dashboard
+      # A dashboard whose cells failed still produces an HTML file, so the exit
+      # code alone does not tell us the build was good.
+      - name: Check the build
         if: steps.panel.outputs.found == 'true'
         run: |
           set -euo pipefail
           test -s site/index.html
-          grep -q "quarto-dashboard" site/index.html
-          if grep -q "observablehq--error" site/index.html; then
-            echo "dashboard rendered with OJS errors"; exit 1
+          grep -q quarto-dashboard site/index.html
+          if grep -q observablehq--error site/index.html; then
+            echo "::error::the dashboard rendered with OJS errors"
+            exit 1
           fi
 
-      - name: Collect only the rendered output
+      # Only rendered output is published. The .qmd, the stylesheets and any
+      # local env file would otherwise be served alongside it.
+      - name: Stage the rendered site
         if: steps.panel.outputs.found == 'true'
         run: |
           set -euo pipefail
-          mkdir -p _publish
-          cp site/index.html _publish/
-          cp -R site/index_files _publish/
-          # the .qmd, the scss and any local env file must not reach Pages
-          find _publish -name "*.qmd" -o -name ".Renviron" -o -name "*.scss" | tee /dev/stderr | grep -q . && exit 1 || true
+          mkdir -p _site
+          cp site/index.html _site/
+          cp -R site/index_files _site/
+          if find _site \( -name '*.qmd' -o -name '*.scss' -o -name '.Renviron' \) | grep -q .; then
+            echo "::error::source files reached the publish directory"
+            exit 1
+          fi
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         if: steps.panel.outputs.found == 'true'
         with:
-          path: _publish
+          path: _site
 
   deploy:
     needs: render
-    # Pages needs a public repository on a free plan, and there is nothing to
-    # deploy until a panel exists.
+    # nothing to deploy without a panel, and Pages needs a public repository on
+    # a free plan
     if: needs.render.outputs.rendered == 'true'
     runs-on: ubuntu-latest
     environment:
@@ -112,4 +117,4 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
