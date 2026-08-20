@@ -4,6 +4,26 @@
 # derived rebuild error. Warning (run continues and publishes, recorded in the
 # manifest): a missing upstream release, a quarantined snapshot, an unknown era.
 
+# Read the panel a previous run published. Shared by the incremental path and
+# the chunked collector, which differ in what they do with the rows, not in how
+# they read them.
+read_prior_panel <- function(panel_path) {
+  if (!file.exists(panel_path)) return(list(snapshots = NULL, offices = NULL))
+  con <- DBI::dbConnect(RSQLite::SQLite(), panel_path)
+  on.exit(DBI::dbDisconnect(con))
+  snaps <- DBI::dbReadTable(con, "pt_snapshots")
+  offs  <- tryCatch(DBI::dbReadTable(con, "offices"), error = function(e) NULL)
+  for (v in c("snapshot_date", "publication_date", "service_request_date")) {
+    snaps[[v]] <- as.Date(snaps[[v]], origin = "1970-01-01")
+  }
+  snaps$range_valid <- as.logical(snaps$range_valid)
+  if (!is.null(offs) && nrow(offs)) {
+    offs$first_seen <- as.Date(offs$first_seen, origin = "1970-01-01")
+    offs$last_seen  <- as.Date(offs$last_seen,  origin = "1970-01-01")
+  }
+  list(snapshots = snaps, offices = offs)
+}
+
 run_update <- function(state_dir, assets, out_dir, fetch_fn = download_snapshot,
                        force_full_rebuild = FALSE) {
   manifest_path <- file.path(state_dir, "manifest.json")
@@ -56,23 +76,10 @@ run_update <- function(state_dir, assets, out_dir, fetch_fn = download_snapshot,
         " -- refusing to rebuild and publish a truncated panel")
   }
 
-  prior_snapshots <- NULL; prior_offices <- NULL
-  if (file.exists(panel_path)) {
-    con <- DBI::dbConnect(RSQLite::SQLite(), panel_path)
-    prior <- DBI::dbReadTable(con, "pt_snapshots")
-    # a panel built before the offices dimension existed simply has none yet
-    prior_offices <- tryCatch(DBI::dbReadTable(con, "offices"), error = function(e) NULL)
-    DBI::dbDisconnect(con)
-    if (!is.null(prior_offices) && nrow(prior_offices)) {
-      prior_offices$first_seen <- as.Date(prior_offices$first_seen, origin = "1970-01-01")
-      prior_offices$last_seen  <- as.Date(prior_offices$last_seen,  origin = "1970-01-01")
-    }
-    prior$snapshot_date        <- as.Date(prior$snapshot_date,        origin = "1970-01-01")
-    prior$publication_date     <- as.Date(prior$publication_date,     origin = "1970-01-01")
-    prior$service_request_date <- as.Date(prior$service_request_date, origin = "1970-01-01")
-    prior$range_valid          <- as.logical(prior$range_valid)
-    prior_snapshots <- prior[prior$snapshot_date < from, , drop = FALSE]
-  }
+  loaded <- read_prior_panel(panel_path)
+  prior_offices <- loaded$offices
+  prior_snapshots <- if (is.null(loaded$snapshots)) NULL else
+    loaded$snapshots[loaded$snapshots$snapshot_date < from, , drop = FALSE]
 
   res <- run_backfill(work_dir = file.path(state_dir, "work"),
                       assets = affected, out_dir = out_dir, fetch_fn = fetch_fn,
@@ -92,4 +99,48 @@ run_update <- function(state_dir, assets, out_dir, fetch_fn = download_snapshot,
   }
 
   list(status = "updated", rebuilt_from = from, warnings = warns)
+}
+
+# Collect the archive a chunk at a time.
+#
+# This is not run_update with a different anchor. The incremental path drops
+# every prior row from the rebuild anchor forward and re-fetches it, which is
+# correct when upstream re-cuts a day. A chunk is OLDER than everything already
+# held, so the opposite applies: every prior row must survive, and the derived
+# tables are rebuilt over the union. Dropping by date here would silently
+# discard the newer half of the panel on every chunk.
+run_backfill_chunk <- function(state_dir, assets, out_dir,
+                               fetch_fn = download_snapshot) {
+  manifest_path <- file.path(state_dir, "manifest.json")
+  prev <- if (file.exists(manifest_path)) {
+    jsonlite::read_json(manifest_path, simplifyVector = FALSE)
+  } else list(snapshots = list())
+
+  if (nrow(assets) == 0) {
+    return(list(status = "complete", added = 0L, warnings = character(0)))
+  }
+
+  panel_path <- file.path(state_dir, "processing-times.db")
+  if (!file.exists(panel_path) && length(prev$snapshots)) {
+    stop("manifest records ", length(prev$snapshots), " prior snapshot(s) but no ",
+         "panel file was found at ", panel_path,
+         " -- refusing to rebuild and publish a truncated panel", call. = FALSE)
+  }
+  loaded <- read_prior_panel(panel_path)
+
+  res <- run_backfill(work_dir = file.path(state_dir, "work"),
+                      assets = assets, out_dir = out_dir, fetch_fn = fetch_fn,
+                      prior_snapshots = loaded$snapshots, prior_offices = loaded$offices,
+                      prior_manifest = prev)
+
+  warns <- character(0)
+  for (tag in names(res$manifest$snapshots)) {
+    st <- res$manifest$snapshots[[tag]]
+    if (!identical(st$status, "ok")) {
+      warns <- c(warns, sprintf("quarantined %s (%s)", tag, st$reason))
+    }
+  }
+  list(status = "collected", added = nrow(assets),
+       span = range(as.Date(assets$tag)),
+       total = length(res$manifest$snapshots), warnings = warns)
 }

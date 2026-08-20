@@ -29,7 +29,7 @@ run_backfill <- function(work_dir, assets, out_dir, fetch_fn = download_snapshot
                       era = NA_character_, n_rows = NA_integer_)
 
     if (!isTRUE(v$ok)) {
-      manifest_snaps[[tag]] <- list(tag = tag, size_fp = asset_fingerprint(assets$size[i]),
+      manifest_snaps[[tag]] <- list(tag = tag, size_fp = asset_fingerprint(NA_real_),
                                     era = v$era,
                                     n_rows = NA_integer_, status = "quarantined",
                                     reason = v$reason)
@@ -39,7 +39,9 @@ run_backfill <- function(work_dir, assets, out_dir, fetch_fn = download_snapshot
     snaps[[tag]] <- extract_snapshot(con, as.Date(tag))
     offs[[tag]]  <- extract_offices(con, as.Date(tag))
     DBI::dbDisconnect(con)
-    manifest_snaps[[tag]] <- list(tag = tag, size_fp = asset_fingerprint(assets$size[i]),
+    # fingerprint what we actually received, so a re-cut is detected from the
+    # file itself rather than from a number the API reported
+    manifest_snaps[[tag]] <- list(tag = tag, size_fp = asset_fingerprint(file.size(dest)),
                                   era = v$era,
                                   n_rows = v$n_rows, status = "ok", reason = "ok")
   }
