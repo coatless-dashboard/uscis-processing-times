@@ -14,3 +14,6 @@ data/cache/
 site/index.html
 site/index_files/
 site/preview.log
+# pipeline working directories
+/state/
+/out/

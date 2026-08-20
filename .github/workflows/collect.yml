@@ -5,25 +5,24 @@
 # The releases endpoint stops at 1000 rows, so the oldest part of the archive
 # cannot be listed at all. Tags can be listed however deep it goes, and a
 # release can be fetched directly by tag, so collection walks the tag list
-# instead. Each run takes the oldest tags not yet held, adds them to the panel
-# and republishes, then queues the next run if anything is still missing.
+# instead. One run walks as many chunks as its time budget allows, then
+# publishes once. Re-run it until it reports nothing remaining.
 name: Collect
 
 on:
   workflow_dispatch:
     inputs:
       chunk_size:
-        description: "Snapshots to collect in this run."
+        description: "Snapshots per chunk. Each chunk rebuilds the derived tables, so fewer, larger chunks finish sooner."
         type: number
-        default: 100
-      continue:
-        description: "Queue the next chunk automatically until the archive is complete."
-        type: boolean
-        default: true
+        default: 250
+      budget_minutes:
+        description: "Stop starting new chunks after this many minutes."
+        type: number
+        default: 90
 
 permissions:
   contents: write
-  actions: write
 
 concurrency:
   group: processing-times-update   # never runs alongside Update
@@ -67,37 +66,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_RELEASES_REPO: ${{ secrets.SOURCE_RELEASES_REPO }}
           CHUNK_SIZE: ${{ inputs.chunk_size }}
-        run: |
-          Rscript -e '
-            for (f in c("config.R","normalize.R","extract.R","fetch.R","panel.R",
-                        "derive.R","manifest.R","artifacts.R","checks.R",
-                        "backfill.R","update.R")) source(file.path("scripts", f));
-
-            n <- as.integer(Sys.getenv("CHUNK_SIZE", "100"));
-            prev <- if (file.exists("state/manifest.json"))
-                      jsonlite::read_json("state/manifest.json", simplifyVector = FALSE)
-                    else list(snapshots = list());
-
-            all_tags <- list_all_tags();
-            todo <- pending_tags(all_tags, prev, n);
-            message("archive tags: ", length(all_tags),
-                    " | already held: ", length(prev$snapshots),
-                    " | this chunk: ", length(todo));
-
-            if (length(todo) == 0) {
-              writeLines("remaining=0", Sys.getenv("GITHUB_OUTPUT"));
-              message("archive complete");
-              quit(save = "no", status = 0)
-            }
-
-            assets <- assets_for_tags(todo);
-            res <- run_backfill_chunk("state", assets, "out");
-            print(res);
-            for (w in res$warnings) message("WARNING: ", w);
-
-            remaining <- length(setdiff(all_tags, union(names(prev$snapshots), todo)));
-            writeLines(paste0("remaining=", remaining), Sys.getenv("GITHUB_OUTPUT"));
-            message("remaining after this run: ", remaining)'
+          BUDGET_MINUTES: ${{ inputs.budget_minutes }}
+        run: Rscript tools/collect.R
 
       - name: Publish artifacts
         env:
@@ -115,16 +85,6 @@ jobs:
             gh release upload current "${files[@]}" --clobber
           fi
 
-      # Queue the next chunk rather than looping inside one job, so each chunk
-      # is a separate run with its own log and the walk can be stopped by
-      # simply not queueing again.
-      - name: Queue the next chunk
-        if: inputs.continue && steps.collect.outputs.remaining != '0'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Report
         run: |
-          echo "::notice title=Continuing::${{ steps.collect.outputs.remaining }} snapshots still to collect; queueing the next chunk."
-          gh workflow run Collect \
-            --ref "${GITHUB_REF_NAME}" \
-            -f chunk_size="${{ inputs.chunk_size }}" \
-            -f continue=true
+          echo "::notice title=Collect::${{ steps.collect.outputs.collected }} collected, ${{ steps.collect.outputs.remaining }} remaining. Re-run this workflow to continue."
