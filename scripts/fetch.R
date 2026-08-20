@@ -78,24 +78,15 @@ list_all_tags <- function(repo = SOURCE_RELEASES_REPO, gh_fn = NULL,
   sort(unique(tags[grepl("^\\d{4}-\\d{2}-\\d{2}$", tags)]))
 }
 
-# One release, addressed by tag. Returns a zero-row frame when the tag has no
-# usable asset so a gap in the upstream degrades to "skip" rather than an error.
-assets_for_tags <- function(tags, repo = SOURCE_RELEASES_REPO, gh_fn = NULL) {
-  if (is.null(gh_fn)) gh_fn <- function(endpoint, ...) gh::gh(endpoint, ...)
-  rows <- lapply(tags, function(tg) {
-    r <- tryCatch(gh_fn(paste0("GET /repos/", repo, "/releases/tags/", tg)),
-                  error = function(e) NULL)
-    if (is.null(r) || length(r$assets) == 0) return(NULL)
-    a <- r$assets[[1]]
-    data.frame(tag = tg, asset_name = a$name, size = as.numeric(a$size),
-               stringsAsFactors = FALSE)
-  })
-  rows <- Filter(Negate(is.null), rows)
-  if (length(rows) == 0) {
-    return(data.frame(tag = character(0), asset_name = character(0),
-                      size = numeric(0), stringsAsFactors = FALSE))
-  }
-  do.call(rbind, rows)
+# The asset for a tag, without asking the API. Release assets are named after
+# their tag, and validate_snapshot() checks the file we actually receive
+# (SQLite integrity, required tables, era) rather than trusting a byte count,
+# so no per-tag lookup is needed. A tag whose asset is named otherwise fails
+# the download and is quarantined with a reason, which is visible, rather than
+# being silently skipped.
+assets_for_tags <- function(tags) {
+  data.frame(tag = tags, asset_name = paste0(tags, ".db"),
+             size = rep(NA_real_, length(tags)), stringsAsFactors = FALSE)
 }
 
 # Oldest first, so the archive fills backwards from where it already reaches.

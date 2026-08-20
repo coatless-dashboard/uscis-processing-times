@@ -113,3 +113,12 @@ test_that("an archive deeper than the API ceiling warns instead of erroring", {
   expect_warning(out <- list_release_assets("owner/repo", gh_fn = fake_gh), "ceiling")
   expect_equal(nrow(out), 1000L)                  # capped, not crashed
 })
+
+test_that("assets_for_tags derives the asset from the tag without calling the API", {
+  out <- assets_for_tags(c("2022-03-21", "2026-08-18"))
+  expect_equal(out$asset_name, c("2022-03-21.db", "2026-08-18.db"))
+  # size is unknown here on purpose: validate_snapshot() checks the file we
+  # actually receive, and NA disables its redundant byte-count comparison
+  expect_true(all(is.na(out$size)))
+  expect_equal(nrow(assets_for_tags(character(0))), 0L)
+})
