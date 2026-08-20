@@ -1,0 +1,16 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+docs/superpowers/
+site/_site/
+site/.quarto/
+data/cache/
+*.db
+.Renviron
+
+# Build output. The render workflow produces these from index.qmd; committing
+# them adds tens of megabytes of churn and ships stale copies of the dashboard.
+site/index.html
+site/index_files/
+site/preview.log

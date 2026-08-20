@@ -1,0 +1,97 @@
+# .github/workflows/render.yml
+name: Render dashboard
+
+on:
+  # after a data update lands, so the site always reflects the newest panel
+  workflow_run:
+    workflows: ["Update"]
+    types: [completed]
+  # editing the dashboard itself
+  push:
+    paths:
+      - "site/**"
+      - ".github/workflows/render.yml"
+  # and on demand
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: processing-times-render
+  cancel-in-progress: true
+
+jobs:
+  render:
+    # a failed data update should not publish a stale or half-built panel
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "release"
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::DBI
+            any::RSQLite
+            any::dplyr
+            any::tidyr
+            any::ggplot2
+            any::htmltools
+      - uses: quarto-dev/quarto-actions/setup@v2
+
+      - name: Fetch the published panel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p panel
+          gh release download current --pattern "processing-times.db" --dir panel
+          ls -lh panel/
+
+      - name: Render
+        env:
+          # the panel carries the office dimension, so nothing else is needed
+          USCIS_PANEL: ${{ github.workspace }}/panel/processing-times.db
+        run: quarto render site/index.qmd --to dashboard
+
+      - name: Fail if the build produced an empty dashboard
+        run: |
+          set -euo pipefail
+          test -s site/index.html
+          grep -q "quarto-dashboard" site/index.html
+          if grep -q "observablehq--error" site/index.html; then
+            echo "dashboard rendered with OJS errors"; exit 1
+          fi
+
+      - name: Collect only the rendered output
+        run: |
+          set -euo pipefail
+          mkdir -p _publish
+          cp site/index.html _publish/
+          cp -R site/index_files _publish/
+          # the .qmd, the scss and any local env file must not reach Pages
+          find _publish -name "*.qmd" -o -name ".Renviron" -o -name "*.scss" | tee /dev/stderr | grep -q . && exit 1 || true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _publish
+
+  deploy:
+    needs: render
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

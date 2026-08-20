@@ -1,0 +1,2310 @@
+---
+title: "USCIS Processing Times"
+subtitle: "Collated from daily snapshots of what USCIS published"
+format:
+  dashboard:
+    orientation: rows
+    scrolling: false
+    theme:
+      light: [cosmo, custom.scss]
+      dark: [cosmo, custom.scss, dark.scss]
+execute:
+  echo: false
+  warning: false
+  message: false
+knitr:
+  opts_chunk:
+    dev: png
+    dev.args:
+      bg: transparent
+---
+
+```{r}
+#| label: setup
+#| output: false
+library(DBI); library(RSQLite); library(ggplot2); library(dplyr); library(htmltools)
+
+# Both come from the environment. A baked-in default would ship one machine's
+# absolute paths, and the archive filename is itself a detail about the source.
+PANEL <- Sys.getenv("USCIS_PANEL", unset = "")
+if (!nzchar(PANEL)) {
+  stop("USCIS_PANEL is not set. Point it at the published panel .db.", call. = FALSE)
+}
+RAW <- Sys.getenv("USCIS_RAW_SNAPSHOT", unset = "")   # optional; the panel carries offices
+
+con <- dbConnect(SQLite(), PANEL)
+onx <- function(x) as.Date(x, origin = "1970-01-01")
+
+snap <- dbGetQuery(con, "SELECT snapshot_date, form_name, office_code, form_subtype,
+  range_lower_months lo, range_upper_months up, range_lower_reason lo_reason,
+  range_valid, subtype_info_en, publication_date, service_request_date,
+  range_upper_unit FROM pt_snapshots")
+snap$snapshot_date <- onx(snap$snapshot_date)
+# USCIS stamps each estimate with the day it computed it, and separately names the
+# date a case must predate before you may call. Both are published; neither is shown.
+snap$age_days <- as.numeric(snap$snapshot_date) - snap$publication_date
+snap$implied_up <- (as.numeric(snap$snapshot_date) - snap$service_request_date) / 30.44
+
+cov <- dbGetQuery(con, "SELECT date, absent, n_rows FROM coverage ORDER BY date")
+cov$date <- onx(cov$date)
+
+disc <- dbGetQuery(con, "SELECT form_name, office_code, form_subtype, event_type,
+  event_date, status FROM disclosure_events")
+disc$event_date <- onx(disc$event_date)
+
+evts <- dbGetQuery(con, "SELECT form_name, office_code, form_subtype, event_date,
+  prev_upper_months pu, new_upper_months nu, delta_upper_months du,
+  delta_lower_months dl, direction FROM pt_events WHERE delta_upper_months IS NOT NULL")
+evts$event_date <- onx(evts$event_date)
+
+inq <- dbGetQuery(con, "SELECT form_name, office_code, form_subtype, snapshot_date,
+  observed_delta_days, anomaly_class FROM inquiry_events WHERE anomaly_class <> 'normal'")
+inq$snapshot_date <- onx(inq$snapshot_date)
+dbDisconnect(con)
+
+# office code -> human name, recovered from a raw snapshot (the panel carries codes only)
+# The panel carries the office dimension, folded across every snapshot era, so
+# retired offices keep the name they were last published under. Older panels
+# predate that table, hence the fallback to a raw snapshot.
+offnm <- tryCatch(dbGetQuery(con2 <- dbConnect(SQLite(), PANEL, flags = SQLITE_RO),
+                             "SELECT code, description FROM offices"),
+                  error = function(e) NULL)
+if (!is.null(offnm)) try(dbDisconnect(con2), silent = TRUE)
+if (is.null(offnm) || !nrow(offnm)) {
+  offnm <- tryCatch({
+    c2 <- dbConnect(SQLite(), RAW); on.exit(dbDisconnect(c2))
+    dbGetQuery(c2, "SELECT code, description FROM offices")
+  }, error = function(e) data.frame(code = character(), description = character()))
+}
+
+PAL <- c(teal = "#1E8FB8", crimson = "#C13A5E", olive = "#6E9B2A", violet = "#8B62B8")
+# ggplot renders to a transparent PNG that must sit on either theme, so its ink
+# is a mid tone legible on both and its grid is translucent rather than a colour.
+INK   <- "#8A939E"
+MUTED <- "#7E8894"
+GRID  <- grDevices::adjustcolor("#8A939E", alpha.f = .26)
+
+# office code -> readable name, used in every table so no bare acronyms are shown
+OFFNAME <- setNames(offnm$description, offnm$code)
+oname <- function(x) { n <- unname(OFFNAME[x]); ifelse(is.na(n), x, n) }
+
+theme_panel <- function(base = 11.5) {
+  theme_minimal(base_size = base) + theme(
+    plot.background  = element_rect(fill = "transparent", colour = NA),
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    legend.background = element_rect(fill = "transparent", colour = NA),
+    legend.key = element_rect(fill = "transparent", colour = NA),
+    plot.title = element_blank(),
+    plot.subtitle = element_text(colour = MUTED, size = base - 1.5, margin = margin(b = 9)),
+    plot.caption = element_text(colour = MUTED, size = base - 2.5, hjust = 0,
+                                margin = margin(t = 9)),
+    plot.caption.position = "plot",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(colour = GRID, linewidth = .38),
+    axis.title = element_text(colour = MUTED, size = base - 2),
+    axis.text = element_text(colour = MUTED, size = base - 2.5),
+    legend.position = "top", legend.title = element_blank(),
+    legend.text = element_text(colour = INK, size = base - 1.5),
+    legend.margin = margin(b = -4),
+    strip.text = element_text(colour = INK, face = "bold", size = base - 1.5),
+    plot.margin = margin(4, 8, 2, 2))
+}
+mo <- function(x, d = 1) paste0(format(round(x, d), nsmall = d), " mo")
+
+# Renders a themed HTML table. Reactable ships its own light palette and loads
+# after the theme bundle, so it cannot follow a dark/light toggle; this markup
+# reads the same CSS tokens as everything else and switches for free.
+dt_table <- function(df, right = character(), bold = character(),
+                     mono = character(), colour = list(), note = NULL,
+                     prose = character()) {
+  th <- paste0("<th", ifelse(names(df) %in% right, ' class="r"', ""), ">",
+               names(df), "</th>", collapse = "")
+  body <- apply(df, 1, function(row) {
+    cells <- vapply(names(df), function(nm) {
+      cls <- c(if (nm %in% right) "r", if (nm %in% bold) "b", if (nm %in% mono) "k",
+               if (nm %in% prose) "prose")
+      val <- htmltools::htmlEscape(row[[nm]])
+      if (!is.null(colour[[nm]])) cls <- c(cls, colour[[nm]](val))
+      sprintf('<td class="%s">%s</td>', paste(cls, collapse = " "), val)
+    }, character(1))
+    paste0("<tr>", paste(cells, collapse = ""), "</tr>")
+  })
+  # the note sits outside the scroller: inside it the flex container squeezes it
+  htmltools::HTML(sprintf(
+    '<div class="dt-box"><div class="dt-scroll"><table class="dt"><thead><tr>%s</tr></thead><tbody>%s</tbody></table></div>%s</div>',
+    th, paste(body, collapse = ""),
+    if (is.null(note)) "" else sprintf('<div class="chart-note">%s</div>', note)))
+}
+
+
+latest <- max(snap$snapshot_date)
+cur <- snap[snap$snapshot_date == latest, ]
+OFFICE_FORMS <- c("N-400", "I-485", "N-600", "N-600K")
+PSEUDO <- c("SCD", "NBC", "FOD", "IPO", "IOP", "EFC")
+# minimum recorded backslides before a form is worth ranking on severity
+BW_FLOOR <- 40
+
+# ---- every figure quoted anywhere on this dashboard is derived here, so the
+# ---- copy stays true when the panel is rebuilt on newer snapshots.
+present <- cov[cov$absent == 0, ]
+drops <- present |> arrange(date) |> mutate(chg = n_rows - lag(n_rows)) |> filter(!is.na(chg))
+big_drop <- drops |> slice_min(chg, n = 1, with_ties = FALSE)
+run_len <- with(rle(cov$absent), max(c(0, lengths[values == 1])))
+retired <- c("CSC","NSC","SSC","ESC","YSC")
+ret_last <- suppressWarnings(max(snap$snapshot_date[snap$office_code %in% retired]))
+worst_row <- cur |> filter(!is.na(up)) |> slice_max(up, n = 1, with_ties = FALSE)
+bw_all <- inq |> filter(anomaly_class == "backward")
+bw <- inq |> filter(anomaly_class == "backward")
+disc_day <- disc |> filter(event_type == "disappeared") |>
+  count(event_date, sort = TRUE) |> slice_head(n = 1)
+inverted_keys <- snap |> filter(range_valid == 0) |>
+  distinct(form_name, office_code, form_subtype) |> nrow()
+
+S <- list(
+  snapshots  = length(unique(snap$snapshot_date)),
+  rows       = nrow(snap),
+  forms      = n_distinct(snap$form_name),
+  start      = format(min(snap$snapshot_date)), end = format(latest),
+  peak       = max(present$n_rows), now = present$n_rows[which.max(present$date)],
+  absent     = sum(cov$absent), absent_run = run_len,
+  drop_date  = format(big_drop$date), drop_size = abs(big_drop$chg),
+  drop_from  = big_drop$n_rows - big_drop$chg, drop_to = big_drop$n_rows,
+  ret_last   = if (is.finite(ret_last)) format(ret_last) else NA_character_,
+  ret_n      = length(retired),
+  worst_v    = round(worst_row$up), worst_form = worst_row$form_name,
+  worst_off  = oname(worst_row$office_code),
+  bw_n       = nrow(bw),
+  bw_keys    = n_distinct(paste(bw$form_name, bw$office_code, bw$form_subtype)),
+  bw_days    = n_distinct(bw$snapshot_date),
+  rescued    = sum(snap$lo_reason == "missing_value", na.rm = TRUE),
+  invalid    = sum(snap$range_valid == 0), invalid_keys = inverted_keys,
+  disc_day   = format(disc_day$event_date), disc_day_n = disc_day$n,
+  office_forms = paste(OFFICE_FORMS, collapse = ", ")
+)
+S$pct_fall <- round((S$peak - S$now) / S$peak * 100, 1)
+S$false_disc <- format(signif(S$bw_keys * S$absent, 2), big.mark = ",")
+fmt <- function(x) format(x, big.mark = ",")
+```
+
+```{r}
+#| label: ojs-payloads
+#| output: false
+
+# --- per-office first vs last, for every form that has a real office dimension
+off <- snap |>
+  filter(form_name %in% OFFICE_FORMS, !is.na(up), range_valid == 1,
+         !office_code %in% PSEUDO, nchar(office_code) == 3) |>
+  group_by(form_name, form_subtype, office_code) |>
+  arrange(snapshot_date) |>
+  summarise(first_up = first(up), last_up = last(up),
+            first_lo = first(lo), last_lo = last(lo), n = n(), .groups = "drop") |>
+  left_join(offnm, by = c("office_code" = "code")) |>
+  mutate(office_name = ifelse(is.na(description), office_code, description),
+         label = paste0(form_name, " · ", form_subtype),
+         delta = last_up - first_up)
+
+# --- monthly series for EVERY form, so the explorer covers all 44
+series <- snap |>
+  filter(!is.na(up)) |>
+  mutate(ym = format(snapshot_date, "%Y-%m")) |>
+  group_by(form_name, form_subtype, office_code, ym) |>
+  slice_tail(n = 1) |>
+  ungroup() |>
+  transmute(form = form_name, subtype = form_subtype, office = office_code,
+            ym, lo = round(lo, 2), up = round(up, 2))
+
+form_index <- snap |>
+  filter(snapshot_date == latest) |>
+  group_by(form_name) |>
+  summarise(offices = n_distinct(office_code), subtypes = n_distinct(form_subtype),
+            worst = suppressWarnings(max(up, na.rm = TRUE)), .groups = "drop") |>
+  mutate(worst = ifelse(is.finite(worst), worst, NA_real_)) |>
+  arrange(form_name)
+
+desc <- snap |> filter(snapshot_date == latest) |>
+  distinct(form_name, form_subtype, subtype_info_en)
+
+offname_tbl <- data.frame(code = names(OFFNAME), name = unname(OFFNAME),
+                          stringsAsFactors = FALSE)
+
+# --- backslides: monthly, zero-filled so the quiet stretches stay visible.
+#     Backward moves land in bursts on a handful of release days, so daily
+#     spikes render as hairlines; monthly bins give the bars real width.
+bwx <- inq |> filter(anomaly_class == "backward")
+bwm <- bwx |>
+  mutate(ym = format(snapshot_date, "%Y-%m")) |>
+  group_by(ym) |>
+  summarise(events  = n(),
+            keys    = n_distinct(paste(form_name, office_code, form_subtype)),
+            days    = n_distinct(snapshot_date),
+            mean_d  = round(mean(abs(observed_delta_days))),
+            worst_d = round(max(abs(observed_delta_days))), .groups = "drop")
+bwm <- data.frame(ym = format(seq(min(bwx$snapshot_date), max(bwx$snapshot_date),
+                                  by = "month"), "%Y-%m"), stringsAsFactors = FALSE) |>
+  left_join(bwm, by = "ym") |>
+  mutate(across(-ym, \(v) ifelse(is.na(v), 0, v))) |>
+  arrange(ym)
+
+# --- backslides: per form, every form clearing the 40-event floor
+bwf <- bwx |>
+  group_by(form_name) |>
+  summarise(events  = n(), offices = n_distinct(office_code),
+            mean_d  = round(mean(abs(observed_delta_days)), 1),
+            med_d   = round(median(abs(observed_delta_days))),
+            worst_d = round(max(abs(observed_delta_days))), .groups = "drop") |>
+  filter(events >= BW_FLOOR) |> arrange(desc(mean_d))
+
+bwnote <- data.frame(
+  monthly = sprintf(paste("The case-inquiry date is the date USCIS tells you to wait for before",
+                          "calling about a pending case. It normally advances one day per day.",
+                          "When an estimate is revised it can move backwards, so a cohort that",
+                          "could call yesterday cannot today. Bars count keys moved backwards in",
+                          "each month: %s moves across %s keys, landing on %s release days out of",
+                          "the whole archive. Hover a bar for that month's detail."),
+                    fmt(S$bw_n), fmt(S$bw_keys), fmt(S$bw_days)),
+  perform = sprintf(paste("Every form with at least %s recorded backslides, %s of them.",
+                          "Bars are the mean days the inquiry date moved backwards per event.",
+                          "Hover a bar for the median and the worst single move."),
+                    BW_FLOOR, nrow(bwf)),
+  stringsAsFactors = FALSE)
+
+# --- disclosure: withdrawals per year, split by how firmly they are established
+dwd <- disc |> filter(event_type == "disappeared")
+dpeak <- dwd |> count(event_date, name = "n") |>
+  mutate(year = format(event_date, "%Y")) |>
+  group_by(year) |> slice_max(n, n = 1, with_ties = FALSE) |>
+  transmute(year, peak_day = format(event_date), peak_n = n) |> ungroup()
+
+dyear <- dwd |> mutate(year = format(event_date, "%Y")) |>
+  group_by(year) |>
+  summarise(confirmed   = sum(status == "confirmed"),
+            provisional = sum(status == "provisional"),
+            forms   = n_distinct(form_name),
+            offices = n_distinct(office_code), .groups = "drop") |>
+  left_join(dpeak, by = "year") |> arrange(year)
+
+# --- disclosure: which forms lost the most keys
+dform <- dwd |> group_by(form_name) |>
+  summarise(keys = n(), offices = n_distinct(office_code),
+            subtypes = n_distinct(form_subtype),
+            first = format(min(event_date)), last = format(max(event_date)),
+            .groups = "drop") |> arrange(desc(keys)) |> slice_head(n = 12)
+
+discnote <- data.frame(
+  byyear = sprintf(paste("Bars count keys that stopped being published, by the year they went.",
+                         "A key only counts once it is missing from two snapshots in a row, so a",
+                         "day the feed was unreachable is never read as a withdrawal. Without",
+                         "that rule the %s missing days would have produced about %s false ones.",
+                         "%s withdrawals in all, of which %s were later reversed."),
+                   S$absent, S$false_disc, fmt(nrow(dwd)),
+                   sum(disc$event_type == "retracted")),
+  byform = sprintf(paste("The %s forms that lost the most keys. Most losses are office",
+                         "granularity rather than a form being discontinued. The heaviest",
+                         "single day was %s with %s withdrawals."),
+                   nrow(dform), S$disc_day, S$disc_day_n),
+  stringsAsFactors = FALSE)
+
+# ---------------------------------------------------------------- new analyses
+OFFICE_ONLY <- function(d) d[nchar(d$office_code) == 3 & !d$office_code %in% PSEUDO, ]
+
+# --- spread across offices at the latest snapshot, per office form
+spread <- OFFICE_ONLY(cur) |>
+  filter(form_name %in% OFFICE_FORMS, range_valid == 1, !is.na(up)) |>
+  transmute(form = form_name, subtype = form_subtype, office = office_code,
+            name = oname(office_code), lo, up) |>
+  arrange(form, up)
+
+# --- what moved in the most recent release
+last_rel <- max(evts$event_date)
+release <- evts |> filter(event_date == last_rel) |>
+  arrange(desc(abs(du))) |> slice_head(n = 40) |>
+  transmute(form = form_name, office = oname(office_code), subtype = form_subtype,
+            pu = round(pu, 1), nu = round(nu, 1), du = round(du, 1), direction)
+
+# --- freshness: how old is the number you are shown
+# across the whole archive, not the latest day: the newest snapshot lands right
+# after a release, so every figure looks one day old and the typical staleness
+# a reader actually meets disappears
+stale_dist <- snap |> filter(!is.na(age_days)) |>
+  mutate(wk = pmin(10L, as.integer(age_days %/% 7))) |>
+  count(wk, name = "n") |> arrange(wk) |>
+  mutate(band = ifelse(wk == 10, "70+", paste0(wk * 7, " to ", wk * 7 + 6)),
+         pct = round(100 * n / sum(n), 1))
+stale_month <- snap |> filter(!is.na(age_days)) |>
+  mutate(ym = format(snapshot_date, "%Y-%m")) |>
+  group_by(ym) |> summarise(mean_age = round(mean(age_days), 1),
+                            max_age = round(max(age_days)), .groups = "drop") |> arrange(ym)
+
+# --- the two published numbers against each other, one point per live key
+agree <- cur |> filter(range_valid == 1, !is.na(up), !is.na(implied_up)) |>
+  transmute(form = form_name, office = oname(office_code), subtype = form_subtype,
+            published = round(up, 2), implied = round(implied_up, 2),
+            gap = round(implied_up - up, 2))
+
+# --- months added and removed by revision, per year
+drift <- evts |> mutate(yr = format(event_date, "%Y")) |>
+  group_by(yr) |>
+  summarise(revisions = n(),
+            added   = round(sum(du[du > 0])),
+            removed = round(sum(du[du < 0])),
+            net     = round(sum(du)), .groups = "drop") |> arrange(yr)
+
+# --- form by year levels, for the matrix
+heat <- snap |> filter(range_valid == 1, !is.na(up)) |>
+  mutate(yr = format(snapshot_date, "%Y")) |>
+  group_by(form_name, yr) |>
+  summarise(mu = round(mean(up), 1),
+            ml = round(mean(lo, na.rm = TRUE), 1),
+            n = n(), .groups = "drop") |>
+  mutate(ml = ifelse(is.finite(ml), ml, NA_real_),
+         sp = ifelse(is.na(ml), NA_real_, round(mu - ml, 1))) |>
+  group_by(form_name) |> filter(sum(n) > 2000) |> ungroup()
+
+# --- which way the two bounds moved together
+patterns <- evts |> filter(!is.na(dl)) |>
+  mutate(pattern = case_when(
+    dl == 0 & du != 0 ~ "upper only",
+    du == 0 & dl != 0 ~ "lower only",
+    dl * du > 0       ~ "same direction",
+    dl * du < 0       ~ "opposite directions",
+    TRUE              ~ "both unchanged")) |>
+  count(pattern, name = "n") |> arrange(desc(n))
+
+# --- the precision USCIS actually publishes at
+prec <- snap |> filter(!is.na(up)) |>
+  mutate(frac = round(up - floor(up), 2),
+         bucket = ifelse(frac %in% c(0, 0.5), sprintf("%.1f", frac), "other")) |>
+  count(bucket, name = "n") |> arrange(desc(n))
+
+# --- is a rise broad or concentrated: per form, and per office within a form
+yr_form <- snap |> filter(range_valid == 1, !is.na(up)) |>
+  mutate(yr = format(snapshot_date, "%Y")) |>
+  group_by(form_name, yr) |> summarise(mu = mean(up), n = n(), .groups = "drop")
+Y1 <- sort(unique(yr_form$yr)); Y_PREV <- Y1[length(Y1) - 1]; Y_NOW <- Y1[length(Y1)]
+formchg <- yr_form |> filter(yr %in% c(Y_PREV, Y_NOW), n > 500) |>
+  tidyr::pivot_wider(names_from = yr, values_from = c(mu, n)) |>
+  transmute(form = form_name,
+            prev = round(.data[[paste0("mu_", Y_PREV)]], 1),
+            now  = round(.data[[paste0("mu_", Y_NOW)]], 1)) |>
+  filter(!is.na(prev), !is.na(now)) |>
+  mutate(chg = round(now - prev, 2)) |> arrange(desc(chg))
+
+yr_off <- OFFICE_ONLY(snap) |> filter(range_valid == 1, !is.na(up),
+                                      form_name %in% OFFICE_FORMS) |>
+  mutate(yr = format(snapshot_date, "%Y")) |>
+  group_by(form_name, office_code, yr) |> summarise(mu = mean(up), .groups = "drop")
+offchg <- yr_off |> filter(yr %in% c(Y_PREV, Y_NOW)) |>
+  tidyr::pivot_wider(names_from = yr, values_from = mu) |>
+  filter(!is.na(.data[[Y_PREV]]), !is.na(.data[[Y_NOW]])) |>
+  group_by(form_name) |>
+  summarise(offices = n(),
+            rose = sum(.data[[Y_NOW]] > .data[[Y_PREV]]),
+            fell = sum(.data[[Y_NOW]] < .data[[Y_PREV]]), .groups = "drop") |>
+  mutate(pct_rose = round(100 * rose / offices, 1)) |> arrange(desc(pct_rose))
+
+# figures the copy quotes, so the wording follows the data
+S2 <- list(
+  age_mean  = round(mean(snap$age_days, na.rm = TRUE)),
+  age_max   = round(max(snap$age_days, na.rm = TRUE)),
+  age_now   = round(mean(cur$age_days, na.rm = TRUE)),
+  rel_date  = format(last_rel),
+  rel_n     = sum(evts$event_date == last_rel),
+  rel_worse = sum(evts$event_date == last_rel & evts$direction == "worsened"),
+  rel_better= sum(evts$event_date == last_rel & evts$direction == "improved"),
+  agree_pct = round(100 * mean(abs(agree$gap) <= 1), 1),
+  agree_gap = round(mean(agree$gap), 2),
+  gap_side  = sum(agree$gap < -1),
+  prev_yr   = Y_PREV, now_yr = Y_NOW,
+  rose_n    = sum(formchg$chg > 0), form_n = nrow(formchg),
+  cadence   = round(mean(diff(sort(unique(evts$event_date))))),
+  prec_half = round(100 * sum(prec$n[prec$bucket %in% c("0.0","0.5")]) / sum(prec$n), 1))
+
+note2 <- data.frame(
+  spread = "Every office publishing this form at the latest snapshot, ordered by upper bound. The gap between the fastest and slowest office is the part of the wait that depends only on where a case was filed.",
+  release = sprintf(paste("The release of %s carried %s revisions: %s worsened against %s",
+                          "improved. Revisions land roughly every %s days."),
+                    S2$rel_date, fmt(S2$rel_n), fmt(S2$rel_worse), fmt(S2$rel_better), S2$cadence),
+  stale = sprintf(paste("USCIS stamps every estimate with the date it computed it, then serves",
+                        "it unchanged until the next cycle, so what you read is always older",
+                        "than it looks. Bars count observations by how old the figure already",
+                        "was when collected. The mean is %s days, the oldest %s. Age barely",
+                        "varies by form, because the publication cycle sets it, not the form."),
+                  S2$age_mean, S2$age_max),
+  stale_trend = "Mean and maximum age of the published estimate, by month of collection.",
+  agree = sprintf(paste("Each dot is one key published today. Across is the upper bound USCIS",
+                        "publishes for it; up is the wait implied by the date it says a case must",
+                        "predate before you may call. The dashed line is where the two match.",
+                        "%s of %s keys sit within a month of it, the inquiry date running %s days",
+                        "short of the bound, which is about the gap that rounding every estimate",
+                        "to the nearest half month produces."),
+                  fmt(sum(abs(agree$gap) <= 1)), fmt(nrow(agree)),
+                  round(abs(S2$agree_gap) * 30.44)),
+  drift = "Months added and removed by revision each year, with the net marked. Positive means the published waits grew over the year.",
+  heat = "Mean upper bound in months, by form and year. Reading down a column shows whether that form recovered or deteriorated. Darker is a longer wait, on a scale set by the highest and lowest cell shown.",
+  patterns = "How the two bounds moved when a revision touched them. Opposite directions means the span widened or narrowed rather than shifting.",
+  prec = sprintf(paste("USCIS reports its two bounds to the half month and nothing finer: %s%%",
+                       "of values land exactly on .0 or .5, so a bound moving less than half a",
+                       "month has moved less than the agency reports. The dates it publishes are",
+                       "exact, so the day counts elsewhere are unaffected."), S2$prec_half),
+  formchg = sprintf(paste("Change in the mean upper bound from %s to %s. %s of %s forms with",
+                          "enough coverage to compare rose."),
+                    Y_PREV, Y_NOW, S2$rose_n, S2$form_n),
+  stringsAsFactors = FALSE)
+
+# --- when a key stopped (or resumed) being published, for marking the series
+discev <- disc |>
+  filter(event_type %in% c("disappeared", "retracted")) |>
+  transmute(form = form_name, subtype = form_subtype, office = office_code,
+            ym = format(event_date, "%Y-%m"), date = format(event_date),
+            kind = ifelse(event_type == "retracted", "returned", "stopped"),
+            status)
+
+# --- the collection record, and the gaps in it. A break in the line is not just
+#     absence: a change can land inside one, and then it cannot be dated to a day.
+covrows <- cov |>
+  transmute(d = format(date), n = ifelse(absent == 1, NA_real_, n_rows),
+            absent = as.integer(absent))
+
+.r <- rle(cov$absent == 1)
+.i <- cumsum(c(0, utils::head(.r$lengths, -1))) + 1
+gaps <- data.frame(start = cov$date[.i], len = .r$lengths, is_gap = .r$values,
+                   stringsAsFactors = FALSE) |>
+  filter(is_gap) |>
+  mutate(end = start + len - 1) |>
+  rowwise() |>
+  mutate(before = { v <- cov$n_rows[cov$date < start & cov$absent == 0]
+                    if (length(v)) utils::tail(v, 1) else NA_real_ },
+         after  = { v <- cov$n_rows[cov$date > end & cov$absent == 0]
+                    if (length(v)) v[1] else NA_real_ },
+         events = sum(disc$event_date == (end + 1))) |>
+  ungroup() |>
+  mutate(delta = after - before,
+         start = format(start), end = format(end)) |>
+  select(start, end, len, before, after, delta, events) |>
+  arrange(desc(len))
+
+GAP_LABEL_MIN <- 3L   # shorter runs are a single missing day, not a visible break
+big_gap <- gaps[gaps$len >= GAP_LABEL_MIN, ]
+
+note4 <- data.frame(
+  cover = sprintf(paste("Keys published on each day the feed was reachable. Shaded columns are",
+                        "the %s days with no snapshot, in %s runs. The widest is %s days, across",
+                        "which the count fell from %s to %s. Hover one for what changed inside."),
+                  S$absent, nrow(gaps), gaps$len[1],
+                  fmt(gaps$before[1]), fmt(gaps$after[1])),
+  stringsAsFactors = FALSE)
+
+# --- how each published figure becomes a number on this dashboard. Built as a
+#     table because the point is the rule, not the prose around it.
+n_norm  <- sum(!is.na(snap$up))
+dirn    <- table(factor(evts$direction, c("improved","worsened","unchanged")))
+disc_n  <- table(factor(disc$status, c("confirmed","provisional","retracted")))
+n_off   <- length(unique(spread$office))
+
+DERIV_R <- data.frame(
+  Quantity = c(
+    "Bound in months", "Missing bound", "Range validity", "Revision event",
+    "Revision direction", "Inquiry-date movement", "Withdrawal", "Collection gap",
+    "Retired service centres", "Age of the estimate", "Office spread", "Break in a line"),
+  Input = c(
+    "the bound and its unit string",
+    "the same fields, nothing usable published",
+    "the two normalised bounds",
+    "consecutive snapshots of a key",
+    "delta on the upper bound",
+    "inquiry date day to day",
+    "a key vanishing",
+    "the coverage table",
+    "office code against its successor",
+    "snapshot date minus publication date",
+    "latest snapshot, field offices",
+    "a run of days with no snapshot"),
+  Rule = c(
+    "weeks x 7 / 30.44, days / 30.44, months left alone",
+    "NA with a reason code, never 0",
+    "invalid when the lower exceeds the upper, checked after normalising",
+    "dated to the first day seen, bounded by the previous snapshot",
+    "judged on the upper bound alone",
+    "one day of advance expected per elapsed day",
+    "confirmed only after two present snapshots both lack the key",
+    "recorded absent, never counted as a withdrawal",
+    "mapped to the successor so consolidation does not break a series",
+    "no rounding; the age on the day it was collected",
+    "pseudo office codes excluded",
+    "drawn as a hole and shaded, never bridged; a change inside one carries the date collection resumed, not the date it happened"),
+  Result = c(
+    sprintf("%s values normalised", fmt(n_norm)),
+    sprintf("%s rows carry a reason", fmt(S$rescued)),
+    sprintf("%s observations across %s keys fail", fmt(S$invalid), S$invalid_keys),
+    sprintf("%s events, landing every %s days", fmt(nrow(evts)), S2$cadence),
+    sprintf("%s worsened, %s improved, %s unchanged",
+            fmt(dirn[["worsened"]]), fmt(dirn[["improved"]]), fmt(dirn[["unchanged"]])),
+    sprintf("%s backward moves across %s keys", fmt(S$bw_n), fmt(S$bw_keys)),
+    sprintf("%s confirmed, %s provisional, %s retracted",
+            fmt(disc_n[["confirmed"]]), fmt(disc_n[["provisional"]]), fmt(disc_n[["retracted"]])),
+    sprintf("%s days absent, longest run %s", S$absent, S$absent_run),
+    if (is.na(S$ret_last)) "none in this span"
+      else sprintf("%s centres, last seen %s", S$ret_n, S$ret_last),
+    sprintf("mean %s days, oldest %s", S2$age_mean, S2$age_max),
+    sprintf("%s offices compared", n_off),
+    sprintf("%s days in %s runs, widest %s days", S$absent, nrow(gaps), gaps$len[1])),
+  stringsAsFactors = FALSE)
+
+THRESH_R <- data.frame(
+  Rule = c("Percentile basis", "Published precision", "Withdrawal confirmation",
+           "Backslide ranking floor", "Forms with a per-office dimension",
+           "Office codes treated as directorates", "Comparison year pair",
+           "Freeze gate on the monthly grain"),
+  Value = c("USCIS 80% completion method; the bounds are percentile positions, never averaged",
+            sprintf("half a month, %s%% of values land on .0 or .5", S2$prec_half),
+            "two consecutive snapshots that exist and both lack the key",
+            sprintf("%s recorded backslides before a form is ranked on severity", BW_FLOOR),
+            paste(OFFICE_FORMS, collapse = ", "),
+            paste(PSEUDO, collapse = ", "),
+            sprintf("%s against %s", S2$prev_yr, S2$now_yr),
+            "intra-cycle edits are flagged rather than merged into the next revision"),
+  stringsAsFactors = FALSE)
+
+# --- the shape of what USCIS publishes today: every live key, banded by wait
+BAND_W <- 6L; BAND_TOP <- 10L
+livek <- cur |> filter(range_valid == 1, !is.na(up)) |>
+  mutate(b = pmin(BAND_TOP, as.integer(up %/% BAND_W)))
+waitband <- livek |> group_by(b) |>
+  summarise(keys = n(), forms = n_distinct(form_name),
+            top = paste(utils::head(names(sort(table(form_name), decreasing = TRUE)), 3),
+                        collapse = ", "),
+            fastest = sprintf("%s at %s, %s mo",
+                              form_name[which.min(up)], oname(office_code[which.min(up)]),
+                              round(min(up), 1)),
+            slowest = sprintf("%s at %s, %s mo",
+                              form_name[which.max(up)], oname(office_code[which.max(up)]),
+                              round(max(up), 1)),
+            .groups = "drop") |>
+  mutate(band = ifelse(b == BAND_TOP, paste0(BAND_TOP * BAND_W, "+"),
+                       paste0(b * BAND_W, " to ", b * BAND_W + BAND_W - 1)),
+         pct = round(100 * keys / sum(keys), 1)) |>
+  arrange(b)
+
+# --- headline figures, about the waits rather than about our collection
+prev_mean <- mean(snap$up[format(snap$snapshot_date, "%Y") == S2$prev_yr &
+                          snap$range_valid == 1], na.rm = TRUE)
+now_mean  <- mean(snap$up[format(snap$snapshot_date, "%Y") == S2$now_yr &
+                          snap$range_valid == 1], na.rm = TRUE)
+S3 <- list(
+  med_wait  = round(median(livek$up), 1),
+  max_wait  = round(max(livek$up)),
+  max_where = sprintf("%s at %s", livek$form_name[which.max(livek$up)],
+                      oname(livek$office_code[which.max(livek$up)])),
+  live_keys = nrow(livek),
+  offices   = n_distinct(livek$office_code[nchar(livek$office_code) == 3 &
+                                           !livek$office_code %in% PSEUDO]),
+  yoy       = round(now_mean - prev_mean, 1))
+
+note3 <- data.frame(
+  waits = sprintf(paste("Every form, office and subtype USCIS is publishing today, %s in all,",
+                        "grouped by the upper bound of its estimate. Half sit at or below %s",
+                        "months; the tail runs to %s months at %s. Hover a bar for the forms",
+                        "inside it."),
+                  fmt(nrow(livek)), S3$med_wait, S3$max_wait, S3$max_where),
+  stringsAsFactors = FALSE)
+
+# ------------------------------------------------------------------- codebook
+# Built from the live schema rather than written out by hand, so a column added
+# upstream shows up here instead of silently going undocumented.
+CB_DESC <- c(
+  snapshot_date        = "Day the row was collected. One row per key per day the feed was reachable.",
+  form_name            = "USCIS form number, for example I-485.",
+  office_code          = "Three letter office code as published. Pseudo offices such as SCD cover a whole directorate.",
+  office_code_stitched = "Office code after the retired service centres are mapped onto their successors.",
+  form_subtype         = "Sub category within a form. A form can publish several, each with its own bounds.",
+  publication_date     = "Date USCIS says it computed the estimate. Earlier than snapshot_date by the age of the figure.",
+  service_request_date = "Date a case must predate before USCIS will accept an inquiry about it.",
+  range_lower          = "Lower bound exactly as published, in whatever unit the page used.",
+  range_upper          = "Upper bound exactly as published, in whatever unit the page used.",
+  range_lower_unit     = "Unit string as published. Mostly Months, occasionally Weeks, and sometimes scraped link text.",
+  range_upper_unit     = "Unit string as published, same caveats as the lower unit.",
+  range_lower_months   = "Lower bound normalised to months. NA with a reason when nothing usable was published.",
+  range_upper_months   = "Upper bound normalised to months. NA with a reason when nothing usable was published.",
+  range_lower_reason   = "Why the normalised lower bound is missing, when it is. Never blank in place of a zero.",
+  range_upper_reason   = "Why the normalised upper bound is missing, when it is.",
+  range_valid          = "1 when the normalised lower bound does not exceed the upper. Checked after normalisation.",
+  subtype_info_en      = "Plain English description of what the subtype covers.",
+  subtype_info_es      = "The same description in Spanish.",
+  subtype_note_en      = "Footnote USCIS attaches to the subtype.",
+  subtype_note_es      = "The subtype footnote in Spanish.",
+  form_note_en         = "Footnote USCIS attaches to the whole form.",
+  form_note_es         = "The form footnote in Spanish.",
+  event_date           = "Day a change was first observed. Bounded by the snapshot before it.",
+  prev_lower_months    = "Lower bound before the revision, in months.",
+  new_lower_months     = "Lower bound after the revision, in months.",
+  prev_upper_months    = "Upper bound before the revision, in months.",
+  new_upper_months     = "Upper bound after the revision, in months.",
+  delta_lower_months   = "New lower bound minus the previous one. Positive means a longer wait.",
+  delta_upper_months   = "New upper bound minus the previous one. Positive means a longer wait.",
+  direction            = "improved, worsened or unchanged, judged on the upper bound.",
+  intra_cycle_edit     = "1 when the value changed while USCIS's own publication date did not.",
+  first_seen           = "First day this published value was observed.",
+  last_seen            = "Last day this published value was observed.",
+  first_publication_date = "Earliest publication date USCIS stamped on this value.",
+  last_publication_date  = "Latest publication date USCIS stamped on this value.",
+  n_observations       = "Number of daily snapshots in which this value appeared.",
+  n_publication_cycles = "Number of distinct publication dates this value spanned.",
+  event_type           = "appeared, disappeared or retracted.",
+  status               = "confirmed once two consecutive present snapshots lack the key, provisional before that.",
+  date_uncertainty_days = "Width of the window the event could have fallen in, given collection gaps.",
+  successor_key        = "Key the row was stitched onto, when a disappearance was a rename rather than a withdrawal.",
+  expected_delta_days  = "Days the inquiry date should have moved given the gap between snapshots, normally one per elapsed day.",
+  observed_delta_days  = "Days the inquiry date actually moved. Negative means it moved backwards.",
+  delta_excess_days    = "Observed movement minus expected. Zero is an inquiry date keeping pace with the calendar.",
+  anomaly_class        = "How the inquiry date moved: normal, post_gap after a collection gap, leap when it jumped further than the calendar, stalled when it failed to advance, backward, or first_observation.",
+  date                 = "Calendar day of the coverage record.",
+  absent               = "1 when no snapshot exists for the day.",
+  anomalous            = "1 when the snapshot exists but failed a shape check.",
+  n_rows               = "Keys published that day.",
+  present_index        = "Running count of days on which a snapshot exists."
+)
+
+CB_ABOUT_TXT <- c(
+  pt_snapshots = "One row per form, office, subtype and day. This is the spine of the panel: every other table is derived from it. It records what USCIS published on each day it was reachable, including the rows where it published nothing usable.",
+  pt_events    = "One row per observed change to a published bound. An event is dated to the day the change was first seen, which is bounded by the previous snapshot rather than known exactly.",
+  pt_cycles    = "One row per run of identical published values. Useful for asking how long a figure stood and how many publication cycles it survived.",
+  inquiry_events = "One row per movement of the case inquiry date. Normally it advances a day per day; this table exists to record when it does not.",
+  disclosure_events = "One row per key appearing, disappearing or being retracted. A key is only called withdrawn once two consecutive snapshots that exist both lack it.",
+  coverage     = "One row per calendar day in the span, marking whether a snapshot exists. Absence is recorded so a collection gap is never read as the agency withdrawing everything."
+)
+
+cb_con <- dbConnect(SQLite(), PANEL)
+CB_TBLS <- c("pt_snapshots","pt_events","pt_cycles","inquiry_events",
+             "disclosure_events","coverage")
+cb_list <- lapply(CB_TBLS, function(tb) {
+  info <- dbGetQuery(cb_con, sprintf("PRAGMA table_info(%s)", tb))
+  smp  <- dbGetQuery(cb_con, sprintf("SELECT * FROM %s LIMIT 200", tb))
+  n    <- dbGetQuery(cb_con, sprintf("SELECT COUNT(*) n FROM %s", tb))$n
+  nas  <- vapply(info$name, function(v) {
+    k <- dbGetQuery(cb_con, sprintf("SELECT SUM(%s IS NULL) k FROM %s", v, tb))$k
+    round(100 * (if (is.na(k)) 0 else k) / max(n, 1), 1)
+  }, numeric(1))
+  ex <- vapply(info$name, function(v) {
+    val <- smp[[v]][!is.na(smp[[v]])][1]
+    if (length(val) == 0 || is.na(val)) return("never populated")
+    if (v %in% c("snapshot_date","event_date","date","publication_date",
+                 "service_request_date","first_seen","last_seen",
+                 "first_publication_date","last_publication_date"))
+      return(format(onx(as.numeric(val))))
+    out <- as.character(val)
+    if (nchar(out) > 34) paste0(substr(out, 1, 34), "…") else out
+  }, character(1))
+  data.frame(tbl = tb, name = info$name, type = info$type,
+             desc = ifelse(is.na(CB_DESC[info$name]),
+                           "Not yet documented.", unname(CB_DESC[info$name])),
+             example = unname(ex), pct_na = unname(nas), n_rows = n,
+             stringsAsFactors = FALSE)
+})
+codebook <- do.call(rbind, cb_list)
+cb_rowcounts <- as.list(setNames(vapply(cb_list, function(d) d$n_rows[1], numeric(1)), CB_TBLS))
+cb_about <- as.list(CB_ABOUT_TXT[CB_TBLS])
+
+# three real rows per table, columns trimmed so the card stays readable
+cb_sample <- setNames(lapply(CB_TBLS, function(tb) {
+  d <- dbGetQuery(cb_con, sprintf("SELECT * FROM %s LIMIT 3", tb))
+  keep <- head(names(d), 9)
+  d <- d[keep]
+  for (v in names(d)) {
+    if (v %in% c("snapshot_date","event_date","date","publication_date",
+                 "service_request_date","first_seen","last_seen"))
+      d[[v]] <- format(onx(as.numeric(d[[v]])))
+    d[[v]] <- ifelse(is.na(d[[v]]), NA, substr(as.character(d[[v]]), 1, 26))
+  }
+  list(cols = names(d), rows = lapply(seq_len(nrow(d)), function(i) unname(as.list(d[i, ]))))
+}), CB_TBLS)
+dbDisconnect(cb_con)
+
+ojs_define(OFF = off, SERIES = series, FORMS = form_index, DESC = desc,
+           OFFNAMES = offname_tbl, BWM = bwm, BWF = bwf, BWNOTE = bwnote,
+           DYEAR = dyear, DFORM = dform, DISCNOTE = discnote,
+           SPREAD = spread, RELEASE = release, STALED = stale_dist, STALEM = stale_month,
+           AGREE = agree, DRIFT = drift, HEAT = heat, PATTERNS = patterns, PREC = prec,
+           FORMCHG = formchg, OFFCHG = offchg, NOTE2 = note2,
+           WAITBAND = waitband, NOTE3 = note3,
+           COV = covrows, GAPS = gaps, BIGGAP = big_gap, NOTE4 = note4,
+           DISCEV = discev,
+           CB = codebook, CB_TABLES = CB_TBLS, CB_ROWS = cb_rowcounts,
+           CB_ABOUT = cb_about, CB_SAMPLE = cb_sample)
+```
+
+```{ojs}
+//| output: false
+//| label: ojs-helpers
+
+niceTop = (v) => {
+  if (!isFinite(v) || v <= 0) return 10;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  return Math.ceil(v / (p / 2)) * (p / 2);
+}
+
+d3g = (rows, keyfn) => {
+  const m = new Map();
+  for (const r of rows) { const k = keyfn(r); if (!m.has(k)) m.set(k, []); m.get(k).push(r); }
+  return m;
+}
+
+SERIES_COLS = ["#0E7FA8","#B02A50","#5F8A1E","#7C52A8","#B5651D","#2F6F62",
+               "#8A3B8F","#4A6FA5","#9A7B10","#496B2E"]
+
+OFFICE_NAME_MAP = new Map(OFFNAMES.code.map((c, i) => [c, OFFNAMES.name[i]]))
+officeName = (c) => OFFICE_NAME_MAP.get(c) ?? c
+
+DYROWS = DYEAR.year.map((y, i) => ({
+  year: y, confirmed: DYEAR.confirmed[i], provisional: DYEAR.provisional[i],
+  forms: DYEAR.forms[i], offices: DYEAR.offices[i],
+  peak_day: DYEAR.peak_day[i], peak_n: DYEAR.peak_n[i]
+}))
+
+DFROWS = DFORM.form_name.map((f, i) => ({
+  form: f, keys: DFORM.keys[i], offices: DFORM.offices[i],
+  subtypes: DFORM.subtypes[i], first: DFORM.first[i], last: DFORM.last[i]
+}))
+
+OFFROWS = OFF.label.map((l, i) => ({
+  label: l, code: OFF.office_code[i], name: OFF.office_name[i],
+  fu: OFF.first_up[i], lu: OFF.last_up[i],
+  fl: OFF.first_lo[i], ll: OFF.last_lo[i],
+  du: (OFF.last_up[i] == null || OFF.first_up[i] == null) ? null
+      : OFF.last_up[i] - OFF.first_up[i],
+  dl: (OFF.last_lo[i] == null || OFF.first_lo[i] == null) ? null
+      : OFF.last_lo[i] - OFF.first_lo[i]
+}))
+
+ALLROWS = SERIES.form.map((f, i) => ({
+  form: f, subtype: SERIES.subtype[i], office: SERIES.office[i],
+  ym: SERIES.ym[i], lo: SERIES.lo[i], up: SERIES.up[i]
+}))
+
+DESC_MAP = new Map(DESC.form_name.map((f, i) => [f + "|" + DESC.form_subtype[i],
+                                                 DESC.subtype_info_en[i]]))
+shortDesc = (f, s) => {
+  const d = DESC_MAP.get(f + "|" + s) ?? "";
+  return d.length > 44 ? d.slice(0, 44) + "\u2026" : d;
+}
+
+BWROWS = BWM.ym.map((y, i) => ({
+  ym: y, events: BWM.events[i], keys: BWM.keys[i], days: BWM.days[i],
+  mean_d: BWM.mean_d[i], worst_d: BWM.worst_d[i]
+}))
+
+BWFROWS = BWF.form_name.map((f, i) => ({
+  form: f, events: BWF.events[i], offices: BWF.offices[i],
+  mean_d: BWF.mean_d[i], med_d: BWF.med_d[i], worst_d: BWF.worst_d[i]
+}))
+
+nf = (v) => v == null ? "not recorded" : v.toLocaleString("en-US")
+
+plural = (v, w) => v == null ? "not recorded" : nf(v) + " " + w + (v === 1 ? "" : "s")
+
+// Keeps the readout inside its card: it flips to the cursor's left only when
+// there is genuinely no room on the right, measured rather than guessed.
+// Quarto's OJS `width` is the page width, not the cell's, so a chart sized from
+// it gets scaled down by the browser and every label shrinks with it. This
+// measures the card the chart actually lands in and draws at 1:1, redrawing on
+// resize. The second pass exists because the note's height is only knowable
+// once it has been laid out at this width.
+fitted = function (draw, opts = {}) {
+  const { fallbackRatio = 0.55, minHeight = 92 } = opts;
+  // The host stretches to fill the card, so its own box IS the space available:
+  // no arithmetic over padding, sibling controls or the card's own height, all
+  // of which read wrong while the dashboard is still laying itself out.
+  const host = htl.html`<div style="width:100%;flex:1 1 auto;min-height:0;
+    align-self:stretch;display:flex;flex-direction:column;justify-content:flex-start"></div>`;
+  let lastW = 0, lastH = -1;
+  const paint = () => {
+    const w = Math.round(host.clientWidth);
+    const avail = Math.round(host.clientHeight);
+    if (!w) return;
+    if (w === lastW && avail === lastH) return;
+    lastW = w; lastH = avail;
+    if (!avail) { host.replaceChildren(draw(w, Math.round(w * fallbackRatio))); return; }
+
+    const measure = () => {
+      const n = host.querySelector(".chart-note");
+      // scrollHeight, not the rect: a note squeezed by the fill container
+      // reports its clipped height, which would under-reserve and clip it again
+      return n ? Math.max(n.scrollHeight, n.getBoundingClientRect().height) + 10 : 0;
+    };
+    let h = Math.max(minHeight, avail - measure());
+    host.replaceChildren(draw(w, h));
+    // the first pass draws at a guessed height, which can wrap the note
+    // differently; once it is laid out for real, correct the reserve once
+    const h2 = Math.max(minHeight, avail - measure());
+    if (Math.abs(h2 - h) > 6) host.replaceChildren(draw(w, h2));
+  };
+  new ResizeObserver(paint).observe(host);
+  requestAnimationFrame(paint);
+  [60, 200, 600].forEach(t => setTimeout(paint, t));
+  return host;
+}
+
+placeTip = function (tip, ev, box) {
+  const x = ev.clientX - box.left, y = ev.clientY - box.top;
+  const w = tip.offsetWidth || 300, h = tip.offsetHeight || 90;
+  tip.style.left = (x + 18 + w <= box.width ? x + 18
+                    : Math.max(4, x - 18 - w)) + "px";
+  tip.style.top = Math.max(4, Math.min(box.height - h - 4, y - 30)) + "px";
+}
+
+// A daily series with the gaps drawn as gaps, and each run of missing days
+// shaded so a change that landed inside one is not read as a change on the day
+// collection resumed.
+gapChart = function (rows, gaps, opts = {}) {
+  const { width = 1320, height = 300, note = "", yUnit = "" } = opts;
+  if (!rows.length) return htl.html`<div class="empty">Nothing recorded.</div>`;
+
+  const W = width, H = height, M = { t: 26, r: 22, b: 34, l: 60 };
+  const idx = new Map(rows.map((r, i) => [r.d, i]));
+  const X = i => M.l + (i / (rows.length - 1)) * (W - M.l - M.r);
+  const vals = rows.map(r => r.n).filter(v => v != null);
+  const yLo = Math.floor(Math.min(...vals) / 50) * 50;
+  const yTop = niceTop(Math.max(...vals));
+  const Y = v => H - M.b - ((v - yLo) / (yTop - yLo)) * (H - M.t - M.b);
+  const ticks = [0, .25, .5, .75, 1].map(f => Math.round(yLo + (yTop - yLo) * f));
+
+  // one path per unbroken run, so a missing day leaves a real hole in the line
+  const paths = [];
+  let d = "", open = false;
+  rows.forEach((r, i) => {
+    if (r.n == null) { if (open) { paths.push(d); d = ""; open = false; } return; }
+    const x = X(i), y = Y(r.n);
+    d += open ? `H${x}V${y}` : `M${x} ${y}`;
+    open = true;
+  });
+  if (open) paths.push(d);
+
+  const tipEl = htl.html`<div class="ctip"></div>`;
+  const bands = gaps.map(g => {
+    const a = idx.get(g.start), b2 = idx.get(g.end);
+    if (a == null || b2 == null) return null;
+    const w0 = Math.max(7, X(b2) - X(a));
+    const cx = X(a) + w0 / 2;
+    return htl.svg`<g style="cursor:help"
+      onmouseenter=${ev => showGap(ev, g)} onmousemove=${ev => showGap(ev, g)}
+      onmouseleave=${() => { tipEl.style.opacity = 0; }}>
+      <rect x=${X(a)} y=${M.t} width=${w0} height=${H - M.t - M.b}
+        class="sr1" fill="currentColor" fill-opacity=".15"/>
+      <line x1=${cx} x2=${cx} y1=${M.t} y2=${H - M.b} class="sr1" stroke="currentColor"
+        stroke-width="1" stroke-dasharray="3 3" opacity=".65"/>
+      <text x=${cx} y=${M.t - 8} text-anchor="middle" class="ser sr1"
+        fill="currentColor">${g.len} d</text>
+    </g>`;
+  }).filter(Boolean);
+
+  const years = rows.map((r, i) => ({ r, i })).filter(({ r }) => r.d.endsWith("-01-01"));
+
+  const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
+    ${ticks.map(t => htl.svg`<g>
+      <line x1=${M.l} x2=${W - M.r} y1=${Y(t)} y2=${Y(t)} class="grid"/>
+      <text x=${M.l - 8} y=${Y(t) + 4} text-anchor="end" class="ax">${t}${yUnit}</text></g>`)}
+    ${years.map(({ r, i }) => htl.svg`<text x=${X(i)} y=${H - 12} text-anchor="middle"
+      class="ax">${r.d.slice(0, 4)}</text>`)}
+    ${bands}
+    ${paths.map(pd => htl.svg`<path d=${pd} fill="none" stroke="currentColor"
+      stroke-width="1.8" class="sr0"/>`)}
+  </svg>`;
+
+  function showGap(ev, g) {
+    const row = (k, v) => `<div class="ct-r"><span class="ct-k">${k}</span>` +
+                          `<span class="ct-v">${v}</span></div>`;
+    tipEl.innerHTML = `<div class="ct-h">No snapshots, ${g.start} to ${g.end}</div>` +
+      row("days missing", plural(g.len, "day")) +
+      row("keys before", nf(g.before)) +
+      row("keys after", nf(g.after)) +
+      row("change across the gap",
+          (g.delta > 0 ? "+" : "") + nf(g.delta) + " keys") +
+      row("changes forced to the reopen day", nf(g.events)) +
+      `<div class="ct-more">Nothing can be dated inside a gap: the first day a change ` +
+      `can be seen is the day collection resumed, so it carries that date instead.</div>`;
+    tipEl.style.opacity = 1;
+    placeTip(tipEl, ev, svg.getBoundingClientRect());
+  }
+
+  return htl.html`<div class="chart-wrap">${svg}${tipEl}${
+    note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
+}
+
+// Vertical columns, one per row. value/label/detail keep it independent of any
+// one dataset, and every slot is drawn so gaps stay visible as gaps.
+colChart = function (rows, opts = {}) {
+  const { width = 1320, height = 330, note = "", cls = "sr1", yLabel = "",
+          value = r => r.v, label = () => null, detail = () => [],
+          emptyAt = null } = opts;
+  if (!rows.length) return htl.html`<div class="empty">Nothing recorded.</div>`;
+
+  const W = width, H = height, M = { t: 28, r: 22, b: 34, l: 66 };
+  const band = (W - M.l - M.r) / rows.length;
+  const bw = Math.max(3, band * 0.74);
+  const X = i => M.l + band * i + (band - bw) / 2;
+  const yTop = niceTop(Math.max(...rows.map(value)));
+  const Y = v => H - M.b - (v / yTop) * (H - M.t - M.b);
+  const ticks = [0, .25, .5, .75, 1].map(f => Math.round(yTop * f));
+
+  const bars = rows.map((r, i) => htl.svg`<rect x=${X(i)} y=${Y(value(r))} width=${bw}
+      height=${Math.max(0, H - M.b - Y(value(r)))} class="${cls}" fill="currentColor"
+      fill-opacity=".82"/>`);
+  const tipEl = htl.html`<div class="ctip"></div>`;
+
+  const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
+    ${ticks.map(t => htl.svg`<g>
+      <line x1=${M.l} x2=${W - M.r} y1=${Y(t)} y2=${Y(t)} class="grid"/>
+      <text x=${M.l - 8} y=${Y(t) + 4} text-anchor="end" class="ax">${t}</text></g>`)}
+    <text x="2" y="11" class="axl">${yLabel}</text>
+    ${rows.map((r, i) => { const l = label(r); return l == null ? null
+      : htl.svg`<text x=${X(i) + bw / 2} y=${H - 12} text-anchor="middle"
+                 class="ax">${l}</text>`; })}
+    ${bars}
+  </svg>`;
+
+  const hit = htl.svg`<rect x=${M.l} y=${M.t} width=${W - M.l - M.r}
+                       height=${H - M.t - M.b} fill="transparent"/>`;
+  svg.append(hit);
+
+  hit.onmousemove = ev => {
+    const box = svg.getBoundingClientRect();
+    const px = (ev.clientX - box.left) / box.width * W;
+    const i = Math.max(0, Math.min(rows.length - 1, Math.floor((px - M.l) / band)));
+    const r = rows[i];
+    bars.forEach((b2, j) => b2.setAttribute("fill-opacity", j === i ? 1 : .28));
+    const head = `<div class="ct-h">${label(r) ?? r.band ?? r.ym ?? ""}</div>`;
+    tipEl.innerHTML = head + (emptyAt && value(r) === 0
+      ? `<div class="ct-more">${emptyAt}</div>`
+      : detail(r).map(([k, v]) => `<div class="ct-r"><span class="ct-k">${k}</span>` +
+          `<span class="ct-v">${v}</span></div>`).join(""));
+    tipEl.style.opacity = 1;
+    placeTip(tipEl, ev, box);
+  };
+  hit.onmouseleave = () => {
+    bars.forEach(b2 => b2.setAttribute("fill-opacity", .82));
+    tipEl.style.opacity = 0;
+  };
+
+  return htl.html`<div class="chart-wrap">${svg}${tipEl}${
+    note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
+}
+
+// --- row builders for the new analyses -------------------------------------
+cols2rows = (obj) => {
+  const keys = Object.keys(obj);
+  const n = obj[keys[0]].length;
+  return Array.from({ length: n }, (_, i) =>
+    Object.fromEntries(keys.map(k => [k, obj[k][i]])));
+}
+
+SPREADROWS = cols2rows(SPREAD)
+RELROWS    = cols2rows(RELEASE)
+STALEDROWS = cols2rows(STALED)
+STALEMROWS = cols2rows(STALEM)
+AGREEROWS  = cols2rows(AGREE)
+DRIFTROWS  = cols2rows(DRIFT)
+HEATROWS   = cols2rows(HEAT)
+PATROWS    = cols2rows(PATTERNS)
+PRECROWS   = cols2rows(PREC)
+FORMCHGROWS = cols2rows(FORMCHG)
+OFFCHGROWS  = cols2rows(OFFCHG)
+WAITROWS    = cols2rows(WAITBAND)
+COVROWS     = cols2rows(COV)
+DISCEVROWS  = cols2rows(DISCEV)
+GAPROWS     = cols2rows(BIGGAP)
+CBROWS      = cols2rows(CB)
+
+// Every office on one axis, so the spread that depends purely on where a case
+// was filed is visible as a distance rather than inferred from a table.
+stripChart = function (rows, opts = {}) {
+  const { width = 1320, height = 300, note = "", empty = "Nothing published for this selection." } = opts;
+  if (!rows.length) return htl.html`<div class="empty">${empty}</div>`;
+
+  const W = width, H = height, M = { t: 40, r: 26, b: 46, l: 26 };
+  const vals = rows.flatMap(r => [r.lo, r.up]).filter(v => v != null);
+  const hi = niceTop(Math.max(...vals));
+  const X = v => M.l + (v / hi) * (W - M.l - M.r);
+  const ticks = [0, .25, .5, .75, 1].map(f => Math.round(hi * f));
+  const laneU = M.t + (H - M.t - M.b) * 0.32;
+  const laneL = M.t + (H - M.t - M.b) * 0.72;
+
+  const quant = (arr, q) => {
+    const a = arr.slice().sort((x, y) => x - y);
+    return a[Math.min(a.length - 1, Math.floor(q * (a.length - 1)))];
+  };
+  const ups = rows.map(r => r.up).filter(v => v != null);
+  const q1 = quant(ups, .25), med = quant(ups, .5), q3 = quant(ups, .75);
+
+  // a deterministic offset per index keeps overlapping offices readable
+  const jitter = i => ((i * 37) % 11 - 5) * 2.1;
+  const tipEl = htl.html`<div class="ctip"></div>`;
+  const dotsU = rows.map((r, i) => r.up == null ? null :
+    htl.svg`<circle cx=${X(r.up)} cy=${laneU + jitter(i)} r="4.6" class="pt sr1"
+      fill="currentColor" fill-opacity=".62"
+      onmouseenter=${ev => show(ev, r)} onmousemove=${ev => show(ev, r)} />`);
+  const dotsL = rows.map((r, i) => r.lo == null ? null :
+    htl.svg`<circle cx=${X(r.lo)} cy=${laneL + jitter(i)} r="4.6" class="pt sr0"
+      fill="currentColor" fill-opacity=".62"
+      onmouseenter=${ev => show(ev, r)} onmousemove=${ev => show(ev, r)} />`);
+
+  const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
+    ${ticks.map(t => htl.svg`<g>
+      <line x1=${X(t)} x2=${X(t)} y1=${M.t - 16} y2=${H - M.b} class="grid"/>
+      <text x=${X(t)} y=${H - M.b + 18} text-anchor="middle" class="ax">${t} mo</text></g>`)}
+    <rect x=${X(q1)} y=${M.t - 14} width=${Math.max(1, X(q3) - X(q1))}
+      height=${H - M.b - M.t + 14} class="sr1" fill="currentColor" fill-opacity=".07"/>
+    <line x1=${X(med)} x2=${X(med)} y1=${M.t - 14} y2=${H - M.b} class="rule"
+      stroke-width="1.5" stroke-dasharray="4 3"/>
+    <text x=${X(med)} y=${M.t - 20} text-anchor="middle" class="ser sr1"
+      fill="currentColor">median ${med} mo</text>
+    <text x=${M.l} y=${laneU - 26} class="axl">upper bound, one dot per office</text>
+    <text x=${M.l} y=${laneL - 24} class="axl">lower bound</text>
+    ${dotsU.filter(Boolean)}${dotsL.filter(Boolean)}
+  </svg>`;
+
+  function show(ev, r) {
+    const rank = rows.filter(x => x.up != null && x.up < r.up).length + 1;
+    const n = rows.filter(x => x.up != null).length;
+    tipEl.innerHTML = `<div class="ct-h">${r.name} \u00b7 ${r.office}</div>` +
+      `<div class="ct-r"><i class="sr1" style="background:currentColor"></i>` +
+      `<span class="ct-k">upper bound</span><span class="ct-v">${r.up} mo</span></div>` +
+      `<div class="ct-r"><i class="sr0" style="background:currentColor"></i>` +
+      `<span class="ct-k">lower bound</span><span class="ct-v">${r.lo == null ? "not published" : r.lo + " mo"}</span></div>` +
+      `<div class="ct-r"><span class="ct-k">rank</span>` +
+      `<span class="ct-v">${rank} of ${n}, fastest first</span></div>`;
+    tipEl.style.opacity = 1;
+    placeTip(tipEl, ev, svg.getBoundingClientRect());
+  }
+  svg.onmouseleave = () => { tipEl.style.opacity = 0; };
+
+  return htl.html`<div class="chart-wrap">${svg}${tipEl}${
+    note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
+}
+
+// Added above the axis, removed below, net marked: the sign of a year is the
+// thing being read, so it cannot be a single stacked total.
+divergeChart = function (rows, opts = {}) {
+  const { width = 1320, height = 300, note = "", label = r => r.k,
+          up = r => r.added, down = r => r.removed, net = r => r.net,
+          unit = " mo", detail = () => [] } = opts;
+  if (!rows.length) return htl.html`<div class="empty">Nothing recorded.</div>`;
+
+  const W = width, H = height, M = { t: 22, r: 26, b: 34, l: 66 };
+  const mag = Math.max(...rows.map(r => Math.max(Math.abs(up(r)), Math.abs(down(r)))));
+  const hi = niceTop(mag);
+  const mid = M.t + (H - M.t - M.b) / 2;
+  const Y = v => mid - (v / hi) * ((H - M.t - M.b) / 2);
+  const band = (W - M.l - M.r) / rows.length;
+  const bw = Math.min(Math.max(8, band * 0.5), 62);
+  const X = i => M.l + band * i + (band - bw) / 2;
+  const ticks = [-1, -.5, 0, .5, 1].map(f => Math.round(hi * f));
+
+  const bars = rows.flatMap((r, i) => [
+    htl.svg`<rect x=${X(i)} y=${Y(up(r))} width=${bw} height=${Math.max(0, mid - Y(up(r)))}
+      class="sr1" fill="currentColor" fill-opacity=".8"/>`,
+    htl.svg`<rect x=${X(i)} y=${mid} width=${bw} height=${Math.max(0, Y(down(r)) - mid)}
+      class="sr0" fill="currentColor" fill-opacity=".8"/>`]);
+  const tipEl = htl.html`<div class="ctip"></div>`;
+
+  const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
+    ${ticks.map(t => htl.svg`<g>
+      <line x1=${M.l} x2=${W - M.r} y1=${Y(t)} y2=${Y(t)} class="grid"/>
+      <text x=${M.l - 8} y=${Y(t) + 4} text-anchor="end" class="ax">${t}</text></g>`)}
+    <line x1=${M.l} x2=${W - M.r} y1=${mid} y2=${mid} class="rule"/>
+    <text x="2" y="11" class="axl">months added / removed</text>
+    ${bars}
+    ${rows.map((r, i) => htl.svg`<text x=${X(i) + bw / 2} y=${H - 12}
+      text-anchor="middle" class="ax">${label(r)}</text>`)}
+    ${rows.map((r, i) => htl.svg`<g>
+      <line x1=${X(i) - 4} x2=${X(i) + bw + 4} y1=${Y(net(r))} y2=${Y(net(r))}
+        class="neutral" stroke="currentColor" stroke-width="2.5"/>
+      <text x=${X(i) + bw / 2} y=${Y(net(r)) + (net(r) >= 0 ? -7 : 15)}
+        text-anchor="middle" class="${"ser " + (net(r) > 0 ? "sr1" : "sr0")}"
+        fill="currentColor">${net(r) > 0 ? "+" : ""}${net(r)}</text></g>`)}
+  </svg>`;
+
+  const hit = htl.svg`<rect x=${M.l} y=${M.t} width=${W - M.l - M.r}
+    height=${H - M.t - M.b} fill="transparent"/>`;
+  svg.append(hit);
+  hit.onmousemove = ev => {
+    const box = svg.getBoundingClientRect();
+    const i = Math.max(0, Math.min(rows.length - 1,
+      Math.floor(((ev.clientX - box.left) / box.width * W - M.l) / band)));
+    bars.forEach((b2, j) => b2.setAttribute("fill-opacity",
+      (j === i * 2 || j === i * 2 + 1) ? 1 : .26));
+    tipEl.innerHTML = `<div class="ct-h">${label(rows[i])}</div>` +
+      detail(rows[i]).map(([k, v, c]) =>
+        `<div class="ct-r">${c ? `<i class="${c}" style="background:currentColor"></i>` : ""}` +
+        `<span class="ct-k">${k}</span><span class="ct-v">${v}</span></div>`).join("");
+    tipEl.style.opacity = 1;
+    placeTip(tipEl, ev, box);
+  };
+  hit.onmouseleave = () => {
+    bars.forEach(b2 => b2.setAttribute("fill-opacity", .8));
+    tipEl.style.opacity = 0;
+  };
+
+  return htl.html`<div class="chart-wrap">${svg}${tipEl}${
+    note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
+}
+
+// A matrix reads magnitude, so it takes the sequential ramp, not the series steps.
+heatChart = function (rows, opts = {}) {
+  const { width = 1320, height = 300, note = "", unit = " mo",
+          row = r => r.r, col = r => r.c, value = r => r.v, detail = () => [],
+          value2 = null, split = false } = opts;
+  if (!rows.length) return htl.html`<div class="empty">Nothing recorded.</div>`;
+
+  const rowKeys = [...new Set(rows.map(row))];
+  const colKeys = [...new Set(rows.map(col))].sort();
+  const vals = rows.map(value).filter(v => v != null);
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  // rank within the observed range, in six steps
+  const step = v => Math.min(5, Math.max(0, Math.floor(((v - lo) / (hi - lo || 1)) * 5.999)));
+
+  const W = width, H = height, M = { t: 26, r: 14, b: 8, l: 46 };
+  const cw = (W - M.l - M.r) / colKeys.length;
+  const ch = (H - M.t - M.b) / rowKeys.length;
+  const at = new Map(rows.map(r => [row(r) + "|" + col(r), r]));
+  const tipEl = htl.html`<div class="ctip"></div>`;
+
+  const half = (cw - 3) / 2;
+  const cells = rowKeys.flatMap((rk, i) => colKeys.flatMap((ck, j) => {
+    const r = at.get(rk + "|" + ck);
+    if (!r || value(r) == null) return [];
+    const y = M.t + ch * i + 1, h = Math.max(1, ch - 2);
+    if (!split || value2 == null || value2(r) == null)
+      return [htl.svg`<rect x=${M.l + cw * j + 1} y=${y}
+        width=${Math.max(1, cw - 2)} height=${h} rx="2"
+        class="${"pt hc" + step(value(r))}" fill="currentColor"
+        onmouseenter=${ev => show(ev, r)} onmousemove=${ev => show(ev, r)} />`];
+    // left half is the lower bound, right half the upper, on one shared scale
+    return [
+      htl.svg`<rect x=${M.l + cw * j + 1} y=${y} width=${half} height=${h} rx="2"
+        class="${"pt hc" + step(value2(r))}" fill="currentColor"
+        onmouseenter=${ev => show(ev, r)} onmousemove=${ev => show(ev, r)} />`,
+      htl.svg`<rect x=${M.l + cw * j + 2 + half} y=${y} width=${half} height=${h} rx="2"
+        class="${"pt hc" + step(value(r))}" fill="currentColor"
+        onmouseenter=${ev => show(ev, r)} onmousemove=${ev => show(ev, r)} />`];
+  }));
+  const labels = rowKeys.flatMap((rk, i) => colKeys.flatMap((ck, j) => {
+    const r = at.get(rk + "|" + ck);
+    if (!r || ch < 15 || value(r) == null) return [];
+    const cy = M.t + ch * i + ch / 2 + 3.5;
+    if (!split || value2 == null || value2(r) == null)
+      return [htl.svg`<text x=${M.l + cw * j + cw / 2} y=${cy} text-anchor="middle"
+        class="${"cellv" + (step(value(r)) >= 4 ? " on" : "")}"
+        pointer-events="none">${value(r)}</text>`];
+    return [
+      htl.svg`<text x=${M.l + cw * j + 1 + half / 2} y=${cy} text-anchor="middle"
+        class="${"cellv" + (step(value2(r)) >= 4 ? " on" : "")}"
+        pointer-events="none">${value2(r)}</text>`,
+      htl.svg`<text x=${M.l + cw * j + 2 + half + half / 2} y=${cy} text-anchor="middle"
+        class="${"cellv" + (step(value(r)) >= 4 ? " on" : "")}"
+        pointer-events="none">${value(r)}</text>`];
+  }));
+
+  const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
+    ${colKeys.map((ck, j) => htl.svg`<text x=${M.l + cw * j + cw / 2} y=${M.t - 9}
+      text-anchor="middle" class="ax">${ck}</text>`)}
+    ${rowKeys.map((rk, i) => htl.svg`<text x=${M.l - 8} y=${M.t + ch * i + ch / 2 + 4}
+      text-anchor="end" class="ax">${rk}</text>`)}
+    ${cells.filter(Boolean)}${labels.filter(Boolean)}
+  </svg>`;
+
+  function show(ev, r) {
+    tipEl.innerHTML = `<div class="ct-h">${row(r)} \u00b7 ${col(r)}</div>` +
+      detail(r).map(([k, v]) => `<div class="ct-r"><span class="ct-k">${k}</span>` +
+        `<span class="ct-v">${v}</span></div>`).join("");
+    tipEl.style.opacity = 1;
+    placeTip(tipEl, ev, svg.getBoundingClientRect());
+  }
+  svg.onmouseleave = () => { tipEl.style.opacity = 0; };
+
+  return htl.html`<div class="chart-wrap">${svg}${tipEl}${
+    note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
+}
+
+// Generic x against y with a no-difference diagonal.
+scatterChart = function (pts, opts = {}) {
+  const { width = 1320, height = 300, note = "", xLabel = "", yLabel = "",
+          unit = " mo", detail = () => [], colOf = () => "sr0" } = opts;
+  if (!pts.length) return htl.html`<div class="empty">Nothing to compare.</div>`;
+
+  const W = width, H = height, M = { t: 14, r: 24, b: 42, l: 60 };
+  const hi = niceTop(Math.max(...pts.flatMap(p => [p.x, p.y])));
+  const X = v => M.l + (v / hi) * (W - M.l - M.r);
+  const Y = v => H - M.b - (v / hi) * (H - M.t - M.b);
+  const ticks = [0, .25, .5, .75, 1].map(f => Math.round(hi * f));
+  const tipEl = htl.html`<div class="ctip"></div>`;
+
+  const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
+    ${ticks.map(t => htl.svg`<g>
+      <line x1=${M.l} x2=${W - M.r} y1=${Y(t)} y2=${Y(t)} class="grid"/>
+      <line x1=${X(t)} x2=${X(t)} y1=${M.t} y2=${H - M.b} class="grid"/>
+      <text x=${M.l - 8} y=${Y(t) + 4} text-anchor="end" class="ax">${t}</text>
+      <text x=${X(t)} y=${H - 24} text-anchor="middle" class="ax">${t}</text></g>`)}
+    <line x1=${X(0)} y1=${Y(0)} x2=${X(hi)} y2=${Y(hi)} class="refline"
+      stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x=${(M.l + W - M.r) / 2} y=${H - 5} text-anchor="middle" class="axl">${xLabel}</text>
+    <text transform="rotate(-90)" x=${-(M.t + H - M.b) / 2} y=15 text-anchor="middle"
+      class="axl">${yLabel}</text>
+    ${pts.map(p => htl.svg`<circle cx=${X(p.x)} cy=${Y(p.y)} r="5" fill="currentColor"
+      fill-opacity=".62" stroke-width="1.4" class="${"pt " + colOf(p)}"
+      onmouseenter=${ev => show(ev, p)} onmousemove=${ev => show(ev, p)} />`)}
+  </svg>`;
+
+  function show(ev, p) {
+    tipEl.innerHTML = `<div class="ct-h">${p.k}</div>` +
+      detail(p).map(([k, v, c]) =>
+        `<div class="ct-r">${c ? `<i class="${c}" style="background:currentColor"></i>` : ""}` +
+        `<span class="ct-k">${k}</span><span class="ct-v">${v}</span></div>`).join("");
+    tipEl.style.opacity = 1;
+    placeTip(tipEl, ev, svg.getBoundingClientRect());
+  }
+  svg.onmouseleave = () => { tipEl.style.opacity = 0; };
+
+  return htl.html`<div class="chart-wrap">${svg}${tipEl}${
+    note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
+}
+
+// Ranked horizontal bars, one row per item, with a per-row hover readout.
+// value/label/detail keep it independent of any one dataset's field names.
+rankChart = function (rows, opts = {}) {
+  const { width = 1320, height = 330, note = "", unit = " d", cls = "sr3",
+          value = r => r.v, label = r => r.k, detail = () => [],
+          signed = false } = opts;
+  if (!rows.length) return htl.html`<div class="empty">Nothing recorded.</div>`;
+
+  const longest = Math.max(...rows.map(r => String(label(r)).length));
+  const M = { t: 8, r: 104, b: 24, l: Math.min(190, Math.max(64, longest * 6.4 + 14)) };
+  const W = width, H = height;
+  const rowH = (H - M.t - M.b) / rows.length;
+  const bh = Math.min(rowH * 0.66, 22);
+  // signed bars grow either side of a zero line; unsigned grow from the left
+  const xTop = niceTop(Math.max(...rows.map(r => Math.abs(value(r)))));
+  const span = W - M.l - M.r;
+  const zero = signed ? M.l + span / 2 : M.l;
+  const L = v => (Math.abs(v) / xTop) * (signed ? span / 2 : span);
+  const Y = i => M.t + rowH * i + (rowH - bh) / 2;
+  const ticks = signed ? [-1, -.5, 0, .5, 1].map(f => Math.round(xTop * f))
+                       : [0, .25, .5, .75, 1].map(f => Math.round(xTop * f));
+  const tickX = t => signed ? zero + (t / xTop) * (span / 2) : M.l + L(t);
+  const clsOf = r => signed ? (value(r) > 0 ? "sr1" : "sr0") : cls;
+
+  const bars = rows.map((r, i) => htl.svg`<rect
+      x=${signed && value(r) < 0 ? zero - L(value(r)) : zero} y=${Y(i)}
+      width=${Math.max(1, L(value(r)))}
+      height=${bh} rx="2" class="${clsOf(r)}" fill="currentColor" fill-opacity=".85"/>`);
+  const tipEl = htl.html`<div class="ctip"></div>`;
+
+  const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
+    ${ticks.map(t => htl.svg`<g>
+      <line x1=${tickX(t)} x2=${tickX(t)} y1=${M.t} y2=${H - M.b} class="grid"/>
+      <text x=${tickX(t)} y=${H - 8} text-anchor="middle" class="ax">${t}${unit}</text></g>`)}
+    ${bars}
+    ${rows.map((r, i) => htl.svg`<text x=${signed ? M.l - 10 : M.l - 10}
+        y=${Y(i) + bh / 2 + 4} text-anchor="end" class="ax">${label(r)}</text>`)}
+    ${rows.map((r, i) => htl.svg`<text
+        x=${(signed && value(r) < 0 ? zero - L(value(r)) - 9 : zero + L(value(r)) + 9)}
+        y=${Y(i) + bh / 2 + 4}
+        text-anchor="${signed && value(r) < 0 ? "end" : "start"}"
+        class="${"ser " + clsOf(r)}" fill="currentColor">${
+          signed && value(r) > 0 ? "+" : ""}${value(r)}${unit}</text>`)}
+  </svg>`;
+
+  const hits = rows.map((r, i) => htl.svg`<rect x="0" y=${M.t + rowH * i}
+      width=${W} height=${rowH} fill="transparent"/>`);
+  hits.forEach(h => svg.append(h));
+
+  hits.forEach((h, i) => {
+    h.onmousemove = ev => {
+      bars.forEach((bar, j) => bar.setAttribute("fill-opacity", j === i ? 1 : .3));
+      tipEl.innerHTML = `<div class="ct-h">${label(rows[i])}</div>` +
+        detail(rows[i]).map(([k, v]) =>
+          `<div class="ct-r"><span class="ct-k">${k}</span>` +
+          `<span class="ct-v">${v}</span></div>`).join("");
+      tipEl.style.opacity = 1;
+      placeTip(tipEl, ev, svg.getBoundingClientRect());
+    };
+  });
+  svg.onmouseleave = () => {
+    bars.forEach(bar => bar.setAttribute("fill-opacity", .85));
+    tipEl.style.opacity = 0;
+  };
+
+  return htl.html`<div class="chart-wrap">${svg}${tipEl}${
+    note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
+}
+
+// Stacked columns: one column per row, one segment per named series, with a
+// legend and a hover readout carrying the whole column.
+stackChart = function (rows, opts = {}) {
+  const { width = 1320, height = 330, note = "", segments = [], yUnit = "",
+          label = r => r.k, detail = () => [] } = opts;
+  if (!rows.length) return htl.html`<div class="empty">Nothing recorded.</div>`;
+
+  const total = r => segments.reduce((a, seg) => a + (r[seg.key] ?? 0), 0);
+  const M = { t: 48, r: 22, b: 34, l: 60 };
+  const W = width, H = height;
+  const band = (W - M.l - M.r) / rows.length;
+  const bw = Math.min(Math.max(6, band * 0.62), 74);
+  const X = i => M.l + band * i + (band - bw) / 2;
+  const yTop = niceTop(Math.max(...rows.map(total)));
+  const Y = v => H - M.b - (v / yTop) * (H - M.t - M.b);
+  const ticks = [0, .25, .5, .75, 1].map(f => Math.round(yTop * f));
+
+  // one rect per segment, stacked from the baseline up
+  const cols = rows.map((r, i) => {
+    let acc = 0;
+    return segments.map(seg => {
+      const v = r[seg.key] ?? 0, y0 = acc; acc += v;
+      return htl.svg`<rect x=${X(i)} y=${Y(acc)} width=${bw}
+        height=${Math.max(0, Y(y0) - Y(acc))} class="${seg.cls}" fill="currentColor"
+        fill-opacity=".85"/>`;
+    });
+  });
+  const tipEl = htl.html`<div class="ctip"></div>`;
+
+  const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
+    ${ticks.map(t => htl.svg`<g>
+      <line x1=${M.l} x2=${W - M.r} y1=${Y(t)} y2=${Y(t)} class="grid"/>
+      <text x=${M.l - 8} y=${Y(t) + 4} text-anchor="end" class="ax">${t}${yUnit}</text></g>`)}
+    <text x="2" y="11" class="axl">${opts.yLabel ?? ""}</text>
+    ${segments.map((seg, k) => htl.svg`<g>
+      <rect x=${W - M.r - 78 * (segments.length - k)} y=${8} width="9" height="9" rx="2"
+        class="${seg.cls}" fill="currentColor" fill-opacity=".85"/>
+      <text x=${W - M.r - 78 * (segments.length - k) + 14} y=${16}
+        class="${"ser " + seg.cls}" fill="currentColor">${seg.name}</text></g>`)}
+    ${rows.map((r, i) => htl.svg`<text x=${X(i) + bw / 2} y=${H - 12}
+        text-anchor="middle" class="ax">${label(r)}</text>`)}
+    ${cols.flat()}
+    ${rows.map((r, i) => htl.svg`<text x=${X(i) + bw / 2} y=${Y(total(r)) - 6}
+        text-anchor="middle" class="ax">${total(r)}</text>`)}
+  </svg>`;
+
+  const hit = htl.svg`<rect x=${M.l} y=${M.t} width=${W - M.l - M.r}
+                       height=${H - M.t - M.b} fill="transparent"/>`;
+  svg.append(hit);
+  hit.onmousemove = ev => {
+    const box = svg.getBoundingClientRect();
+    const px = (ev.clientX - box.left) / box.width * W;
+    const i = Math.max(0, Math.min(rows.length - 1, Math.floor((px - M.l) / band)));
+    cols.forEach((set, j) => set.forEach(rect =>
+      rect.setAttribute("fill-opacity", j === i ? 1 : .28)));
+    tipEl.innerHTML = `<div class="ct-h">${label(rows[i])}</div>` +
+      detail(rows[i]).map(([k, v, c]) =>
+        `<div class="ct-r">${c ? `<i class="${c}" style="background:currentColor"></i>` : ""}` +
+        `<span class="ct-k">${k}</span><span class="ct-v">${v}</span></div>`).join("");
+    tipEl.style.opacity = 1;
+    placeTip(tipEl, ev, box);
+  };
+  hit.onmouseleave = () => {
+    cols.forEach(set => set.forEach(rect => rect.setAttribute("fill-opacity", .85)));
+    tipEl.style.opacity = 0;
+  };
+
+  return htl.html`<div class="chart-wrap">${svg}${tipEl}${
+    note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
+}
+
+stepChart = function (rows, opts = {}) {
+  const { height = 340, width = 1320, yUnit = " mo", maxLabels = 5, note = "",
+          marks = [] } = opts;
+  if (!rows.length) return htl.html`<div class="empty">Nothing published for this selection.</div>`;
+
+  const months = [...new Set(rows.map(r => r.ym))].sort();
+  const groups = d3g(rows, r => r.key);
+  const keys = [...groups.keys()].sort((a, b) =>
+    (groups.get(b).at(-1).v ?? -1) - (groups.get(a).at(-1).v ?? -1));
+  const labelled = keys.length <= maxLabels;
+
+  const W = width, H = height, M = { t: 12, r: labelled ? 190 : 26, b: 34, l: 62 };
+  const X = m => M.l + (months.length < 2 ? 0
+              : months.indexOf(m) / (months.length - 1) * (W - M.l - M.r));
+  const yTop = niceTop(Math.max(...rows.map(r => r.v)));
+  const Y = v => H - M.b - (v / yTop) * (H - M.t - M.b);
+  const ticks = [0, .25, .5, .75, 1].map(f => Math.round(yTop * f));
+  const colOf = k => SERIES_COLS[keys.indexOf(k) % SERIES_COLS.length];
+  const sorted = k => groups.get(k).slice().sort((a, b) => a.ym < b.ym ? -1 : 1);
+
+  const rule = htl.svg`<line y1=${M.t} y2=${H - M.b} class="rule" opacity="0"/>`;
+  const dots = keys.map((k, i) => htl.svg`<circle r="4" class="${"sr" + (i % 10)}"
+                        fill="currentColor" opacity="0"/>`);
+  const tipEl = htl.html`<div class="ctip"></div>`;
+  // a series that ends does so for a reason; mark the month it happened
+  const markAt = new Map();
+  for (const m of marks) {
+    if (!months.includes(m.ym)) continue;
+    if (!markAt.has(m.ym)) markAt.set(m.ym, []);
+    markAt.get(m.ym).push(m);
+  }
+  let lastLabelX = -Infinity, row = 0;
+  const markRules = [...markAt.entries()]
+    .sort((a, b) => a[0] < b[0] ? -1 : 1)
+    .map(([ym, ms]) => {
+      const stopped = ms.filter(m => m.kind === "stopped").length;
+      const cls = stopped ? "sr1" : "sr2";
+      const x = X(ym);
+      // two rules a few weeks apart would print their labels on top of each other
+      row = (x - lastLabelX < 46) ? row + 1 : 0;
+      lastLabelX = x;
+      const ly = M.t + 4 + row * 12;
+      return htl.svg`<g>
+        <line x1=${x} x2=${x} y1=${ly + 6} y2=${H - M.b} class="${cls}"
+          stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3" opacity=".7"/>
+        <text x=${x} y=${ly} text-anchor="middle" class="${"ser " + cls}"
+          fill="currentColor">${stopped ? "\u2715" : "\u21ba"}${ms.length > 1 ? " " + ms.length : ""}</text>
+      </g>`;
+    });
+
+  const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
+    ${ticks.map(t => htl.svg`<g>
+      <line x1=${M.l} x2=${W - M.r} y1=${Y(t)} y2=${Y(t)} class="grid"/>
+      <text x=${M.l - 8} y=${Y(t) + 4} text-anchor="end" class="ax">${t}${yUnit}</text></g>`)}
+    ${months.filter(m => m.endsWith("-01")).map(m =>
+      htl.svg`<text x=${X(m)} y=${H - 12} text-anchor="middle" class="ax">${m.slice(0, 4)}</text>`)}
+    ${keys.map(k => {
+      const pts = sorted(k);
+      let d = "";
+      pts.forEach((pt, j) => { const x = X(pt.ym), y = Y(pt.v);
+        d += (j ? `H${x}V${y}` : `M${x} ${y}`); });
+      return htl.svg`<path d=${d} fill="none" stroke="currentColor" stroke-width="2"
+                      stroke-linejoin="round" opacity=".92" class="${"sr" + (keys.indexOf(k) % 10)}"/>`;
+    })}
+    ${labelled ? keys.map(k => { const last = sorted(k).at(-1);
+      return htl.svg`<text x=${X(last.ym) + 9} y=${Y(last.v) + 4} fill="currentColor"
+                      class="${"ser sr" + (keys.indexOf(k) % 10)}">${k} ${last.v}${yUnit}</text>`; }) : null}
+    ${markRules}${rule}${dots}
+  </svg>`;
+
+  const hit = htl.svg`<rect x=${M.l} y=${M.t} width=${W - M.l - M.r}
+                       height=${H - M.t - M.b} fill="transparent"/>`;
+  svg.append(hit);
+
+  hit.onmousemove = ev => {
+    const box = svg.getBoundingClientRect();
+    const px = (ev.clientX - box.left) / box.width * W;
+    const idx = Math.max(0, Math.min(months.length - 1,
+      Math.round((px - M.l) / (W - M.l - M.r) * (months.length - 1))));
+    const ym = months[idx], x = X(ym);
+    rule.setAttribute("x1", x); rule.setAttribute("x2", x); rule.setAttribute("opacity", 1);
+    const readout = keys.map((k, i) => {
+      const pts = sorted(k);
+      let best = null;
+      for (const pt of pts) { if (pt.ym <= ym) best = pt; else break; }
+      const dot = dots[i];
+      if (best) { dot.setAttribute("cx", x); dot.setAttribute("cy", Y(best.v));
+                  dot.setAttribute("opacity", 1); }
+      else dot.setAttribute("opacity", 0);
+      return best ? { k, v: best.v, c: "sr" + (i % 10) } : null;
+    }).filter(Boolean).sort((a, b) => b.v - a.v);
+    const ms = markAt.get(ym) ?? [];
+    const evLine = ms.length ? `<div class="ct-more">` +
+      ms.slice(0, 4).map(m => `${m.kind === "stopped" ? "Stopped" : "Returned"}: ` +
+        `${m.subtype} at ${officeName(m.office)}`).join("<br>") +
+      (ms.length > 4 ? `<br>and ${ms.length - 4} more` : "") + `</div>` : "";
+    tipEl.innerHTML = `<div class="ct-h">${ym}</div>` +
+      readout.slice(0, ms.length ? 6 : 10).map(r =>
+        `<div class="ct-r"><i class=${r.c} style="background:currentColor"></i>` +
+        `<span class="ct-k">${r.k}</span><span class="ct-v">${r.v}${yUnit}</span></div>`).join("") +
+      (readout.length > (ms.length ? 6 : 10)
+        ? `<div class="ct-more">+${readout.length - (ms.length ? 6 : 10)} more</div>` : "") +
+      evLine;
+    tipEl.style.opacity = 1;
+    const left = ev.clientX - box.left;
+    tipEl.style.left = (left > box.width * .6 ? left - 252 : left + 18) + "px";
+    tipEl.style.top = Math.max(4, ev.clientY - box.top - 30) + "px";
+  };
+  hit.onmouseleave = () => {
+    rule.setAttribute("opacity", 0);
+    dots.forEach(d => d.setAttribute("opacity", 0));
+    tipEl.style.opacity = 0;
+  };
+
+  return htl.html`<div class="chart-wrap">${svg}${tipEl}${
+    note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
+}
+
+bandChart = function (rows, opts = {}) {
+  const { width = 1320, height = 300, title = "", note = "", marks = [] } = opts;
+  const pts = rows.slice().sort((a, b) => a.ym < b.ym ? -1 : 1);
+  if (!pts.length) return htl.html`<div class="empty">Nothing published for this selection.</div>`;
+
+  const months = pts.map(p => p.ym);
+  const W = width, H = height, M = { t: 14, r: 132, b: 34, l: 62 };
+  const X = m => M.l + (months.length < 2 ? 0
+              : months.indexOf(m) / (months.length - 1) * (W - M.l - M.r));
+  const vals = pts.flatMap(p => [p.lo, p.up]).filter(v => v != null);
+  const yTop = niceTop(Math.max(...vals));
+  const Y = v => H - M.b - (v / yTop) * (H - M.t - M.b);
+  const ticks = [0, .25, .5, .75, 1].map(f => Math.round(yTop * f));
+  const UP = "sr1", LO = "sr0";
+
+  const both = pts.filter(p => p.lo != null && p.up != null);
+  let band = "";
+  if (both.length > 1) {
+    both.forEach((p, j) => { const x = X(p.ym), y = Y(p.up);
+      band += (j ? `H${x}V${y}` : `M${x} ${y}`); });
+    for (let j = both.length - 1; j >= 0; j--) band += `V${Y(both[j].lo)}H${X(both[j].ym)}`;
+    band += "Z";
+  }
+  const stepPath = acc => {
+    let d = "", started = false;
+    pts.forEach(p => { const v = acc(p); if (v == null) return;
+      const x = X(p.ym), y = Y(v); d += (started ? `H${x}V${y}` : `M${x} ${y}`); started = true; });
+    return d;
+  };
+
+  const last = pts.at(-1);
+  const rule = htl.svg`<line y1=${M.t} y2=${H - M.b} class="rule" opacity="0"/>`;
+  const dU = htl.svg`<circle r="4" class=${UP} fill="currentColor" opacity="0"/>`;
+  const dL = htl.svg`<circle r="4" class=${LO} fill="currentColor" opacity="0"/>`;
+  const tipEl = htl.html`<div class="ctip"></div>`;
+
+  const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
+    ${ticks.map(t => htl.svg`<g>
+      <line x1=${M.l} x2=${W - M.r} y1=${Y(t)} y2=${Y(t)} class="grid"/>
+      <text x=${M.l - 8} y=${Y(t) + 4} text-anchor="end" class="ax">${t} mo</text></g>`)}
+    ${months.filter(m => m.endsWith("-01")).map(m =>
+      htl.svg`<text x=${X(m)} y=${H - 12} text-anchor="middle" class="ax">${m.slice(0, 4)}</text>`)}
+    ${band ? htl.svg`<path d=${band} class=${UP} fill="currentColor" fill-opacity=".10"/>` : null}
+    <path d=${stepPath(p => p.up)} fill="none" stroke="currentColor" stroke-width="2.1"
+          stroke-linejoin="round" class="${UP}"/>
+    <path d=${stepPath(p => p.lo)} fill="none" stroke="currentColor" stroke-width="2.1"
+          stroke-linejoin="round" class="${LO}"/>
+    ${last.up != null ? htl.svg`<text x=${X(last.ym) + 9} y=${Y(last.up) + 4} fill="currentColor"
+        class="${"ser " + UP}">upper ${last.up} mo</text>` : null}
+    ${last.lo != null ? htl.svg`<text x=${X(last.ym) + 9} y=${Y(last.lo) + 4} fill="currentColor"
+        class="${"ser " + LO}">lower ${last.lo} mo</text>` : null}
+    ${marks.filter(m => months.includes(m.ym)).map(m => htl.svg`<g>
+      <line x1=${X(m.ym)} x2=${X(m.ym)} y1=${M.t + 10} y2=${H - M.b}
+        class="${m.kind === "stopped" ? "sr1" : "sr2"}" stroke="currentColor"
+        stroke-width="1.2" stroke-dasharray="4 3" opacity=".7"/>
+      <text x=${X(m.ym)} y=${M.t + 4} text-anchor="middle"
+        class="${"ser " + (m.kind === "stopped" ? "sr1" : "sr2")}"
+        fill="currentColor">${m.kind === "stopped" ? "\u2715" : "\u21ba"}</text></g>`)}
+    ${rule}${dU}${dL}
+  </svg>`;
+
+  const hit = htl.svg`<rect x=${M.l} y=${M.t} width=${W - M.l - M.r}
+                       height=${H - M.t - M.b} fill="transparent"/>`;
+  svg.append(hit);
+  hit.onmousemove = ev => {
+    const box = svg.getBoundingClientRect();
+    const px = (ev.clientX - box.left) / box.width * W;
+    const idx = Math.max(0, Math.min(months.length - 1,
+      Math.round((px - M.l) / (W - M.l - M.r) * (months.length - 1))));
+    const p = pts[idx], x = X(p.ym);
+    rule.setAttribute("x1", x); rule.setAttribute("x2", x); rule.setAttribute("opacity", 1);
+    if (p.up != null) { dU.setAttribute("cx", x); dU.setAttribute("cy", Y(p.up)); dU.setAttribute("opacity", 1); }
+    else dU.setAttribute("opacity", 0);
+    if (p.lo != null) { dL.setAttribute("cx", x); dL.setAttribute("cy", Y(p.lo)); dL.setAttribute("opacity", 1); }
+    else dL.setAttribute("opacity", 0);
+    const gap = (p.lo != null && p.up != null)
+      ? `<div class="ct-r"><i class="neutral" style="background:currentColor"></i><span class="ct-k">span</span>` +
+        `<span class="ct-v">${Math.round((p.up - p.lo) * 10) / 10} mo</span></div>` : "";
+    tipEl.innerHTML = `<div class="ct-h">${p.ym}${title ? " " + title : ""}</div>` +
+      `<div class="ct-r"><i class="${UP}" style="background:currentColor"></i><span class="ct-k">upper bound</span>` +
+      `<span class="ct-v">${p.up == null ? "\u2014" : p.up + " mo"}</span></div>` +
+      `<div class="ct-r"><i class="${LO}" style="background:currentColor"></i><span class="ct-k">lower bound</span>` +
+      `<span class="ct-v">${p.lo == null ? "not published" : p.lo + " mo"}</span></div>` + gap;
+    tipEl.style.opacity = 1;
+    const left = ev.clientX - box.left;
+    tipEl.style.left = (left > box.width * .6 ? left - 252 : left + 18) + "px";
+    tipEl.style.top = Math.max(4, ev.clientY - box.top - 30) + "px";
+  };
+  hit.onmouseleave = () => {
+    rule.setAttribute("opacity", 0);
+    dU.setAttribute("opacity", 0); dL.setAttribute("opacity", 0);
+    tipEl.style.opacity = 0;
+  };
+  return htl.html`<div class="chart-wrap">${svg}${tipEl}${
+    note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
+}
+```
+
+# Overview
+
+## Row {height="19%"}
+
+```{r}
+#| content: valuebox
+#| title: "Median wait now"
+list(icon = "hourglass-split", color = "tone-0", value = paste0(S3$med_wait, " mo"))
+```
+
+```{r}
+#| content: valuebox
+#| title: "Longest wait"
+list(icon = "exclamation-triangle", color = "tone-1", value = paste0(S3$max_wait, " mo"))
+```
+
+```{r}
+#| content: valuebox
+list(title = paste("Change since", S2$prev_yr),
+     icon = if (S3$yoy > 0) "arrow-up-right" else "arrow-down-right",
+     color = if (S3$yoy > 0) "tone-1" else "tone-0",
+     value = paste0(if (S3$yoy > 0) "+" else "", S3$yoy, " mo"))
+```
+
+```{r}
+#| content: valuebox
+#| title: "Forms tracked"
+list(icon = "files", color = "tone-flat", value = n_distinct(snap$form_name))
+```
+
+```{r}
+#| content: valuebox
+#| title: "Field offices"
+list(icon = "geo-alt", color = "tone-flat", value = S3$offices)
+```
+
+## Row {height="53%"}
+
+::: {.card title="Published bound by form and year"}
+
+```{ojs}
+viewof pickHeat = Inputs.radio(["Upper bound", "Lower bound", "Span"],
+  { label: "Show", value: "Upper bound" })
+```
+
+```{ojs}
+fitted((w, h) => heatChart(HEATROWS, {
+  width: w, height: h,
+  note: `Mean ${pickHeat.toLowerCase()} in months, by form and year. \
+Reading down a column shows whether that form recovered or deteriorated. Darker is \
+${pickHeat === "Span" ? "a wider gap between the two bounds" : "a longer wait"}, on a scale \
+set by the highest and lowest cell shown. Hover a cell for both bounds and the span.`,
+  row: r => r.yr, col: r => r.form_name,
+  value: r => pickHeat === "Lower bound" ? r.ml
+            : pickHeat === "Span" ? r.sp : r.mu,
+  detail: r => [["mean lower bound", r.ml == null ? "not published" : r.ml + " mo"],
+                ["mean upper bound", r.mu + " mo"],
+                ["span between them", r.sp == null ? "not published" : r.sp + " mo"],
+                ["observations", nf(r.n)]]
+}), { fallbackRatio: 0.42 })
+```
+
+:::
+
+## Row {height="28%"}
+
+### Column {width="52%"}
+
+```{ojs}
+//| title: "Biggest changes this release"
+{
+  const mo = v => v == null ? "not published" : v + " mo";
+  return htl.html`<div class="dt-scroll"><table class="dt">
+    <thead><tr><th>Form</th><th>Office</th><th>Subtype</th>
+      <th class="r">Was</th><th class="r">Now</th><th class="r">Change</th></tr></thead>
+    <tbody>${RELROWS.map(r => htl.html`<tr>
+      <td class="w">${r.form}</td><td class="w">${r.office}</td>
+      <td class="k">${r.subtype}</td>
+      <td class="r m">${mo(r.pu)}</td><td class="r b">${mo(r.nu)}</td>
+      <td class="${"r " + (r.du > 0 ? "neg" : "pos")}">${
+        (r.du > 0 ? "+" : "") + r.du} mo</td>
+    </tr>`)}</tbody></table>
+    <div class="chart-note">${NOTE2.release[0]}</div></div>`;
+}
+```
+
+### Column {width="48%"}
+
+```{r}
+#| title: "Largest revisions"
+top <- evts |> arrange(desc(du)) |> slice_head(n = 25) |>
+  transmute(Form = form_name, Office = oname(office_code), Subtype = form_subtype,
+            Date = format(event_date),
+            `From` = paste0(round(pu, 1), " mo"), `To` = paste0(round(nu, 1), " mo"),
+            `Jump` = paste0("+", round(du, 1), " mo"))
+
+dt_table(top, right = c("From","To","Jump"), bold = "To",
+         mono = c("Subtype","Date"),
+         colour = list(Jump = function(v) "neg"))
+```
+
+# Forms
+
+## Row {height="8%"}
+
+```{ojs}
+//| layout: [[21, 21, 21, 37]]
+viewof pickForm = Inputs.select(FORMS.form_name, {
+  label: "Form", value: "I-130", width: 250,
+  format: f => f + "  (" + FORMS.offices[FORMS.form_name.indexOf(f)] + " office" +
+    (FORMS.offices[FORMS.form_name.indexOf(f)] === 1 ? "" : "s") + ")"
+})
+
+viewof pickSub = Inputs.select(
+  ["All subtypes", ...new Set(ALLROWS.filter(r => r.form === pickForm)
+    .map(r => r.subtype))].filter((v,i,a) => a.indexOf(v) === i),
+  { label: "Subtype", width: 250,
+    format: s => s === "All subtypes" ? s : s + ", " + shortDesc(pickForm, s) })
+
+viewof pickOff = Inputs.select(
+  ["All offices", ...new Set(ALLROWS
+    .filter(r => r.form === pickForm && (pickSub === "All subtypes" || r.subtype === pickSub))
+    .map(r => r.office))],
+  { label: "Office", width: 250,
+    format: o => o === "All offices" ? o : officeName(o) })
+
+viewof pickMetric = Inputs.radio(["Upper bound", "Lower bound", "Span"],
+  { label: "Show", value: "Upper bound" })
+```
+
+## Row {height="59%"}
+
+```{ojs}
+//| title: "Published bounds"
+{
+  const rows = ALLROWS.filter(r =>
+    r.form === pickForm &&
+    (pickSub === "All subtypes" || r.subtype === pickSub) &&
+    (pickOff === "All offices" || r.office === pickOff));
+
+  const keys = new Set(rows.map(r => r.subtype + "|" + r.office));
+  // events for exactly the keys on screen, so a rule always explains a line
+  const marks = DISCEVROWS.filter(e => e.form === pickForm && keys.has(e.subtype + "|" + e.office));
+
+  // One series selected -> show BOTH bounds as a band. Otherwise upper bound only.
+  if (keys.size === 1) {
+    const one = rows.filter(r => r.up != null || r.lo != null);
+    return fitted((w, h) => bandChart(one, {
+      width: w, height: h, marks,
+      title: pickSub + " · " + officeName(pickOff === "All offices" ? one[0].office : pickOff),
+      note: htl.html`Both published bounds for a single series. The shaded span is the agency's
+        own uncertainty, widen the selection to compare series on the upper bound alone.`
+    }), { fallbackRatio: 0.24 });
+  }
+  const pick = r => pickMetric === "Lower bound" ? r.lo
+                 : pickMetric === "Span" ? (r.lo == null || r.up == null ? null : r.up - r.lo)
+                 : r.up;
+  const series = rows.map(r => ({ key: r.subtype + " · " + officeName(r.office), ym: r.ym,
+                     v: pick(r) == null ? null : Math.round(pick(r) * 10) / 10 }))
+        .filter(r => r.v != null);
+  return fitted((w, h) => stepChart(series,
+    { width: w, height: h, marks,
+      note: htl.html`Showing the ${pickMetric.toLowerCase()}. Hover anywhere to read every
+        series at that month. Narrow to a single subtype <em>and</em> office to see both
+        bounds together as a band.` }), { fallbackRatio: 0.24 });
+}
+```
+
+
+## Row {height="32%"}
+
+```{ojs}
+//| title: "Current bounds"
+{
+  const sel = ALLROWS.filter(r =>
+    r.form === pickForm &&
+    (pickSub === "All subtypes" || r.subtype === pickSub) &&
+    (pickOff === "All offices" || r.office === pickOff));
+  if (!sel.length) return htl.html`<div class="empty">Nothing published for this selection.</div>`;
+  const lastYm = [...new Set(sel.map(r => r.ym))].sort().pop();
+  const now = sel.filter(r => r.ym === lastYm);
+
+  return htl.html`<div class="dt-scroll"><table class="dt">
+    <thead><tr><th>Subtype</th><th>Office</th><th>What it covers</th>
+      <th class="r">Lower bound</th><th class="r">Upper bound</th><th class="r">Span</th></tr></thead>
+    <tbody>${now.sort((a,b) => (b.up ?? -1) - (a.up ?? -1)).map(r => htl.html`<tr>
+      <td class="k">${r.subtype}</td>
+      <td class="w">${officeName(r.office)} <span class="k">${r.office}</span></td>
+      <td class="w">${shortDesc(r.form, r.subtype)}</td>
+      <td class="r">${r.lo == null ? htl.html`<span class="m">not published</span>` : r.lo + " mo"}</td>
+      <td class="r b">${r.up == null ? "not published" : r.up + " mo"}</td>
+      <td class="r m">${r.lo == null || r.up == null ? "not published"
+        : (Math.round((r.up - r.lo) * 10) / 10) + " mo"}</td>
+    </tr>`)}</tbody></table></div>`;
+}
+```
+
+# Offices
+
+## Row {height="8%"}
+
+```{ojs}
+//| layout-ncol: 2
+viewof pickOffice = Inputs.select([...new Set(OFF.label)].sort(), {
+  label: "Form · subtype", value: "N-400 · 160A", width: 320
+})
+
+viewof pickBound = Inputs.radio(["Upper bound", "Lower bound", "Both bounds"],
+  { label: "Show", value: "Upper bound" })
+```
+
+## Row {height="61%"}
+
+### Column {width="54%"}
+
+```{ojs}
+//| title: "Start vs. now, by office"
+{
+  const rows = OFFROWS.filter(r => r.label === pickOffice);
+  const wantUp = pickBound !== "Lower bound";
+  const wantLo = pickBound !== "Upper bound";
+  const both = pickBound === "Both bounds";
+
+  // one plotted point per office per bound: x is the first observation,
+  // y is the current one, so the diagonal is "unchanged"
+  const mk = (set, bound) => set.map(r => ({ r, bound,
+    x: bound === "upper" ? r.fu : r.fl,
+    y: bound === "upper" ? r.lu : r.ll }))
+    .filter(p => p.x != null && p.y != null);
+  const pts = [...(wantUp ? mk(rows, "upper") : []), ...(wantLo ? mk(rows, "lower") : [])];
+  if (!pts.length) return htl.html`<div class="empty">Nothing published for this selection.</div>`;
+
+  // with one bound on screen colour carries direction; with both it has to
+  // carry which bound is which, and the diagonal alone shows direction
+  const colOf = p => both ? (p.bound === "upper" ? "sr1" : "sr0")
+                          : (p.y > p.x ? "sr1" : "sr0");
+
+  const tally = b => {
+    const set = pts.filter(p => p.bound === b);
+    return { n: set.length, worse: set.filter(p => p.y > p.x).length };
+  };
+  const u = tally("upper"), l = tally("lower");
+  const phrase = (t, name) => `${t.worse} of ${t.n} offices carry a longer ${name} bound now`;
+  const noteTxt = both
+    ? `${phrase(u, "upper")}, and ${phrase(l, "lower")}. Both bounds share one pair of axes here, so an office whose two points sit close together moved as a block, while a pair pulling apart means the agency grew less certain rather than simply slower.`
+    : pickBound === "Upper bound"
+      ? `${phrase(u, "upper")}. Anything above the dashed line got slower, in red, and anything below it got faster, in blue.`
+      : `${phrase(l, "lower")}. The lower bound is the earlier percentile, so it moves when the quickest cases slow down. Red is slower, blue faster.`;
+
+  const draw = (W, H) => {
+    const M = {t: 14, r: 24, b: 42, l: 60};
+    const hi = niceTop(Math.max(...pts.flatMap(p => [p.x, p.y])));
+    const X = v => M.l + (v/hi)*(W-M.l-M.r);
+    const Y = v => H - M.b - (v/hi)*(H-M.t-M.b);
+    const ticks = [0,.25,.5,.75,1].map(f => Math.round(hi*f));
+    const tipEl = htl.html`<div class="ctip"></div>`;
+
+    const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
+      ${ticks.map(t => htl.svg`<g>
+        <line x1=${M.l} x2=${W-M.r} y1=${Y(t)} y2=${Y(t)} class="grid"/>
+        <line x1=${X(t)} x2=${X(t)} y1=${M.t} y2=${H-M.b} class="grid"/>
+        <text x=${M.l-8} y=${Y(t)+4} text-anchor="end" class="ax">${t}</text>
+        <text x=${X(t)} y=${H-24} text-anchor="middle" class="ax">${t}</text></g>`)}
+      <line x1=${X(0)} y1=${Y(0)} x2=${X(hi)} y2=${Y(hi)} class="refline"
+            stroke-width="1.5" stroke-dasharray="5 4"/>
+      <text x=${(M.l+W-M.r)/2} y=${H-5} text-anchor="middle" class="axl">first observation (months)</text>
+      <text transform="rotate(-90)" x=${-(M.t+H-M.b)/2} y=15 text-anchor="middle" class="axl">current (months)</text>
+      ${both ? [
+        htl.svg`<g><circle cx=${W-M.r-140} cy=${M.t+9} r="5" class="sr1" fill="currentColor"
+          fill-opacity=".72"/><text x=${W-M.r-129} y=${M.t+13} class="ser sr1"
+          fill="currentColor">upper</text></g>`,
+        htl.svg`<g><circle cx=${W-M.r-72} cy=${M.t+9} r="5" class="sr0" fill="currentColor"
+          fill-opacity=".72"/><text x=${W-M.r-61} y=${M.t+13} class="ser sr0"
+          fill="currentColor">lower</text></g>`] : null}
+      ${pts.map(p => htl.svg`<circle cx=${X(p.x)} cy=${Y(p.y)} r="5.5"
+          fill="currentColor" fill-opacity=".72" stroke-width="1.6"
+          class="${"pt " + colOf(p)}"
+          onmouseenter=${ev => showPt(ev, p)}
+          onmousemove=${ev => showPt(ev, p)}
+          onmouseleave=${() => { tipEl.style.opacity = 0; }} />`)}
+    </svg>`;
+
+    // the readout always carries both bounds, whichever one was hovered, so the
+    // two movements can be compared without switching the control
+    const pair = (a, b2) => (a == null || b2 == null) ? "not published"
+      : `${a} mo <span class="ct-ar">to</span> <b>${b2} mo</b>`;
+    const signed = d => d == null ? "not published"
+      : (d > 0 ? "+" : "") + Math.round(d * 10) / 10 + " mo";
+    const cls = d => d == null ? "" : d > 0 ? "neg" : d < 0 ? "pos" : "";
+
+    function showPt(ev, p) {
+      const r = p.r;
+      const line = (c, k, v, extra = "") =>
+        `<div class="ct-r"><i class="${c}" style="background:currentColor"></i>` +
+        `<span class="ct-k">${k}</span><span class="ct-v ${extra}">${v}</span></div>`;
+      tipEl.innerHTML =
+        `<div class="ct-h">${r.name} · ${r.code}</div>` +
+        line("sr1", "upper bound", pair(r.fu, r.lu)) +
+        line("sr1", "upper change", signed(r.du), cls(r.du)) +
+        line("sr0", "lower bound", pair(r.fl, r.ll)) +
+        line("sr0", "lower change", signed(r.dl), cls(r.dl));
+      tipEl.style.opacity = 1;
+      placeTip(tipEl, ev, svg.getBoundingClientRect());
+    }
+
+    return htl.html`<div class="chart-wrap">${svg}${tipEl}
+      <div class="chart-note">${noteTxt} Hover a point for both bounds.</div></div>`;
+  };
+
+  return fitted(draw, { fallbackRatio: 0.42 });
+}
+```
+
+### Column {width="46%"}
+
+```{ojs}
+//| title: "Spread across offices"
+{
+  const rows = SPREADROWS.filter(r => (r.form + " \u00b7 " + r.subtype) === pickOffice);
+  const ups = rows.map(r => r.up).filter(v => v != null).sort((a, b) => a - b);
+  const fast = rows.find(r => r.up === ups[0]);
+  const slow = rows.find(r => r.up === ups[ups.length - 1]);
+  const note = !ups.length ? "" : htl.html`Every office publishing this form at the
+    latest snapshot, one dot each, on a single axis. The upper bound runs from
+    <b>${ups[0]} months</b> at ${fast.name} to <b>${ups[ups.length - 1]} months</b> at
+    ${slow.name}, a spread of ${Math.round((ups[ups.length - 1] / ups[0]) * 10) / 10}
+    times that depends only on where a case was filed. The shaded band is the middle half.`;
+  // some subtypes are published only at directorate level, where there is no
+  // per-office spread to show; say so rather than looking broken
+  const empty = `This form and subtype is currently published only at directorate
+    level, so it has no per-office spread. Subtypes of the same form that are
+    broken out by field office will show one.`;
+  return fitted((w, h) => stripChart(rows, { width: w, height: h, note, empty }),
+                { fallbackRatio: 0.24 });
+}
+```
+
+## Row {height="30%"}
+
+```{ojs}
+//| title: "All offices, both bounds"
+{
+  const rows = OFFROWS.filter(r => r.label === pickOffice)
+    .sort((a, b) => (b.lu ?? -1) - (a.lu ?? -1));
+  const mo = v => v == null ? htl.html`<span class="m">not published</span>` : v + " mo";
+  const chg = d => d == null ? htl.html`<span class="m">not published</span>`
+    : htl.html`<span class="${d > 0 ? "neg" : d < 0 ? "pos" : ""}">${
+        (d > 0 ? "+" : "") + Math.round(d * 10) / 10} mo</span>`;
+  return htl.html`<div class="dt-scroll"><table class="dt">
+    <thead><tr><th>Office</th>
+      <th class="r">Lower at start</th><th class="r">Lower now</th><th class="r">Lower change</th>
+      <th class="r">Upper at start</th><th class="r">Upper now</th><th class="r">Upper change</th>
+    </tr></thead>
+    <tbody>${rows.map(r => htl.html`<tr>
+      <td class="w">${r.name} <span class="k">${r.code}</span></td>
+      <td class="r m">${mo(r.fl)}</td>
+      <td class="r">${mo(r.ll)}</td>
+      <td class="r">${chg(r.dl)}</td>
+      <td class="r m">${mo(r.fu)}</td>
+      <td class="r b">${mo(r.lu)}</td>
+      <td class="r">${chg(r.du)}</td>
+    </tr>`)}</tbody></table></div>`;
+}
+```
+
+# Trends
+
+## Row {height="52%"}
+
+```{ojs}
+//| title: "Waits USCIS is publishing today"
+fitted((w, h) => colChart(WAITROWS, {
+  width: w, height: h, note: NOTE3.waits[0], yLabel: "keys published", cls: "sr0",
+  label: r => r.band,
+  value: r => r.keys,
+  detail: r => [["keys in this band", nf(r.keys)],
+                ["share of all live keys", r.pct + "%"],
+                ["forms involved", nf(r.forms)],
+                ["most common", r.top],
+                ["fastest here", r.fastest],
+                ["slowest here", r.slowest]]
+}), { fallbackRatio: 0.3 })
+```
+
+## Row {height="48%"}
+
+### Column {width="46%"}
+
+```{ojs}
+//| title: "Months added and removed"
+fitted((w, h) => divergeChart(DRIFTROWS, {
+  width: w, height: h, note: NOTE2.drift[0], label: r => r.yr,
+  up: r => r.added, down: r => r.removed, net: r => r.net,
+  detail: r => [["revisions", nf(r.revisions)],
+                ["months added", "+" + nf(r.added), "sr1"],
+                ["months removed", nf(r.removed), "sr0"],
+                ["net", (r.net > 0 ? "+" : "") + nf(r.net) + " mo"]]
+}), { fallbackRatio: 0.5 })
+```
+
+### Column {width="54%"}
+
+```{ojs}
+//| title: "Year on year change, by form"
+fitted((w, h) => rankChart(FORMCHGROWS, {
+  width: w, height: h, note: NOTE2.formchg[0], unit: " mo", signed: true,
+  value: r => r.chg, label: r => r.form,
+  detail: r => [["earlier year mean", r.prev + " mo"],
+                ["latest year mean", r.now + " mo"],
+                ["change", (r.chg > 0 ? "+" : "") + r.chg + " mo"]]
+}), { fallbackRatio: 0.52 })
+```
+
+# Backslides
+
+## Row {height="19%"}
+
+```{r}
+#| content: valuebox
+#| title: "Backward moves"
+list(icon = "arrow-counterclockwise", color = "tone-1",
+     value = format(sum(inq$anomaly_class == "backward"), big.mark = ","))
+```
+
+```{r}
+#| content: valuebox
+#| title: "Keys affected"
+list(icon = "key", color = "tone-flat",
+     value = format(n_distinct(paste(inq$form_name, inq$office_code, inq$form_subtype)[
+       inq$anomaly_class == "backward"]), big.mark = ","))
+```
+
+```{r}
+#| content: valuebox
+#| title: "Worst single move"
+list(icon = "calendar-x", color = "tone-3",
+     value = paste0(format(round(max(abs(bw_all$observed_delta_days), na.rm = TRUE)/365.25, 1),
+                    nsmall = 1), " yr"))
+```
+
+## Row {height="81%"}
+
+### Column {width="52%"}
+
+```{ojs}
+//| title: "Backslides by month"
+fitted((w, h) => colChart(BWROWS, {
+  width: w, height: h, note: BWNOTE.monthly[0], yLabel: "keys moved backwards",
+  value: r => r.keys,
+  label: r => r.ym.endsWith("-01") ? r.ym.slice(0, 4) : null,
+  emptyAt: "No backward moves recorded this month.",
+  detail: r => [["keys moved back", nf(r.keys)],
+                ["release days", nf(r.days)],
+                ["mean days lost", nf(r.mean_d) + " d"],
+                ["worst single move", nf(r.worst_d) + " d"]]
+}))
+```
+
+### Column {width="48%"}
+
+```{ojs}
+//| title: "Days lost per backslide"
+fitted((w, h) => rankChart(BWFROWS, { width: w, height: h, note: BWNOTE.perform[0],
+  value: r => r.mean_d, label: r => r.form, unit: " d",
+  detail: r => [["backslides recorded", nf(r.events)], ["offices involved", nf(r.offices)],
+                ["mean days lost", nf(r.mean_d) + " d"], ["median days lost", nf(r.med_d) + " d"],
+                ["worst single move", nf(r.worst_d) + " d"]] }), { fallbackRatio: 0.66 })
+```
+
+# Disclosure
+
+## Row {height="34%"}
+
+### Column {width="50%"}
+
+```{ojs}
+//| title: "Withdrawals by year"
+fitted((w, h) => stackChart(DYROWS, {
+  width: w, height: h, note: DISCNOTE.byyear[0], yLabel: "keys withdrawn",
+  label: r => r.year,
+  segments: [{ key: "confirmed", cls: "sr1", name: "confirmed" },
+             { key: "provisional", cls: "sr3", name: "provisional" }],
+  detail: r => [
+    ["confirmed", nf(r.confirmed), "sr1"],
+    ["provisional", nf(r.provisional), "sr3"],
+    ["forms affected", nf(r.forms)],
+    ["offices affected", nf(r.offices)],
+    ["heaviest day", r.peak_day + ", " + nf(r.peak_n)]
+  ]
+}), { fallbackRatio: 0.52 })
+```
+
+### Column {width="50%"}
+
+```{ojs}
+//| title: "Withdrawals by form"
+fitted((w, h) => rankChart(DFROWS, {
+  width: w, height: h, note: DISCNOTE.byform[0], unit: "", cls: "sr0",
+  value: r => r.keys, label: r => r.form,
+  detail: r => [
+    ["keys withdrawn", nf(r.keys)],
+    ["offices affected", nf(r.offices)],
+    ["subtypes affected", nf(r.subtypes)],
+    ["first withdrawal", r.first],
+    ["last withdrawal", r.last]
+  ]
+}), { fallbackRatio: 0.62 })
+```
+
+## Row {height="34%"}
+
+### Column {width="50%"}
+
+```{ojs}
+//| title: "How the bounds moved"
+fitted((w, h) => rankChart(PATROWS, {
+  width: w, height: h, note: NOTE2.patterns[0], unit: "", cls: "sr2",
+  value: r => r.n, label: r => r.pattern,
+  detail: r => [["revisions", nf(r.n)]]
+}), { fallbackRatio: 0.4 })
+```
+
+### Column {width="50%"}
+
+```{r}
+#| title: "Inverted bounds"
+inv <- snap |> filter(range_valid == 0) |>
+  count(form_name, office_code, form_subtype, lower = lo, upper = up, sort = TRUE) |>
+  slice_head(n = 12) |>
+  transmute(Form = form_name, Office = oname(office_code), Subtype = form_subtype,
+            `Lower` = paste0(round(lower, 2), " mo"),
+            `Upper` = paste0(round(upper, 2), " mo"),
+            Observations = format(n, big.mark = ","))
+
+dt_table(inv, right = c("Lower","Upper","Observations"), bold = "Upper",
+         mono = "Subtype", colour = list(Lower = function(v) "neg"))
+```
+
+# Freshness
+
+## Row {height="55%"}
+
+### Column {width="46%"}
+
+```{ojs}
+//| title: "Age of the estimate"
+fitted((w, h) => rankChart(STALEDROWS, {
+  width: w, height: h, note: NOTE2.stale[0], unit: "", cls: "sr4",
+  value: r => r.n, label: r => r.band + " d",
+  detail: r => [["age when collected", r.band + " days"],
+                ["observations", nf(r.n)],
+                ["share of all rows", r.pct + "%"]]
+}), { fallbackRatio: 0.5 })
+```
+
+### Column {width="54%"}
+
+```{ojs}
+//| title: "Inquiry date vs. upper bound"
+fitted((w, h) => scatterChart(
+  AGREEROWS.map(r => ({ x: r.published, y: r.implied, k: r.form + " \u00b7 " + r.office,
+                        g: r.gap, s: r.subtype })), {
+  width: w, height: h, note: NOTE2.agree[0],
+  xLabel: "published upper bound, months",
+  yLabel: "implied, months",
+  colOf: p2 => Math.abs(p2.g) <= 1 ? "sr0" : "sr1",
+  detail: p2 => [["subtype", p2.s],
+                 ["published upper bound", p2.x + " mo"],
+                 ["implied by inquiry date", p2.y + " mo"],
+                 ["difference", (p2.g > 0 ? "+" : "") + p2.g + " mo"]]
+}), { fallbackRatio: 0.5 })
+```
+
+## Row {height="45%"}
+
+### Column {width="52%"}
+
+```{ojs}
+//| title: "Estimate age by month"
+fitted((w, h) => stepChart(
+  STALEMROWS.flatMap(r => [{ key: "mean age", ym: r.ym, v: r.mean_age },
+                           { key: "oldest that month", ym: r.ym, v: r.max_age }]),
+  { width: w, height: h, yUnit: " d", maxLabels: 2, note: NOTE2.stale_trend[0] }),
+  { fallbackRatio: 0.22 })
+```
+
+### Column {width="48%"}
+
+```{ojs}
+//| title: "Keys published per day"
+fitted((w, h) => gapChart(COVROWS, GAPROWS, {
+  width: w, height: h, note: NOTE4.cover[0]
+}), { fallbackRatio: 0.3 })
+```
+
+# Methods
+
+## Row {height="53%"}
+
+```{r}
+#| title: "Derivations"
+dt_table(DERIV_R, mono = "Result", right = character(),
+         prose = c("Input", "Rule"), note = sprintf(paste(
+  "Assembled from %s daily snapshots spanning %s to %s, totalling %s observations of what",
+  "USCIS published on each day. The agency publishes only today's figure and replaces it",
+  "silently, with no changelog and no notification, so stacking daily snapshots is the only",
+  "way to recover the history. Every number here is the agency's own; this project collated",
+  "snapshots that were already public and did not collect them."),
+  fmt(S$snapshots), S$start, S$end, fmt(S$rows)))
+```
+
+## Row {height="47%"}
+
+### Column {width="56%"}
+
+```{r}
+#| title: "Rules and thresholds"
+dt_table(THRESH_R, mono = character(), prose = "Value")
+```
+
+### Column {width="44%"}
+
+```{ojs}
+//| title: "Published precision"
+fitted((w, h) => rankChart(PRECROWS, {
+  width: w, height: h, note: NOTE2.prec[0], unit: "", cls: "sr5",
+  value: r => r.n, label: r => r.bucket === "other" ? "other" : "ends in " + r.bucket,
+  detail: r => [["observations", nf(r.n)]]
+}), { fallbackRatio: 0.3 })
+```
+
+# Codebook
+
+## Row {height="8%"}
+
+```{ojs}
+viewof pickTable = Inputs.radio(CB_TABLES, { label: "Table", value: CB_TABLES[0] })
+```
+
+## Row {height="33%"}
+
+```{ojs}
+//| title: "Variables"
+{
+  const rows = CBROWS.filter(r => r.tbl === pickTable);
+  return htl.html`<div class="dt-scroll"><table class="dt">
+    <thead><tr><th>Variable</th><th>Type</th><th>Description</th>
+      <th>Example</th><th class="r">Missing</th></tr></thead>
+    <tbody>${rows.map(r => htl.html`<tr>
+      <td class="k">${r.name}</td>
+      <td class="m">${r.type}</td>
+      <td class="prose">${r.desc}</td>
+      <td class="k">${r.example}</td>
+      <td class="${"r " + (r.pct_na > 0 ? "m" : "")}">${r.pct_na}%</td>
+    </tr>`)}</tbody></table></div>`;
+}
+```
+
+## Row {height="58%"}
+
+::: {.card title="About this table"}
+
+```{ojs}
+htl.html`<div class="cb-prose">${CB_ABOUT[pickTable]}</div>`
+```
+
+```{ojs}
+{
+  const cols = CB_SAMPLE[pickTable].cols, rows = CB_SAMPLE[pickTable].rows;
+  return htl.html`<div class="dt-scroll"><table class="dt">
+    <thead><tr>${cols.map(c => htl.html`<th>${c}</th>`)}</tr></thead>
+    <tbody>${rows.map(r => htl.html`<tr>${r.map(v =>
+      htl.html`<td class="${v === null ? "m k" : "k"}">${v === null ? "NA" : v}</td>`)}</tr>`)}
+    </tbody></table></div>`;
+}
+```
+
+```{ojs}
+htl.html`<div class="cb-meta"><b>${nf(CB_ROWS[pickTable])}</b> rows and
+  <b>${CBROWS.filter(r => r.tbl === pickTable).length}</b> variables in all;
+  the ${CB_SAMPLE[pickTable].rows.length} above are real, with the first
+  ${CB_SAMPLE[pickTable].cols.length} columns shown.</div>`
+```
+
+:::

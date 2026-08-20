@@ -1,0 +1,76 @@
+/*-- scss:defaults --*/
+$body-bg:    #14181C !default;
+$body-color: #E6EAEE !default;
+$primary:    #3AA0C8 !default;
+$danger:     #D9536F !default;
+$success:    #78A036 !default;
+$warning:    #C79A3A !default;
+
+/* Bootstrap builds .bg-light, card surfaces and table chrome from these at
+   compile time, so setting them here is what makes "light" value boxes and
+   any Bootstrap-owned surface follow the dark ground instead of staying white. */
+$light:       #222932 !default;
+$dark:        #E6EAEE !default;
+$card-bg:     #1B2026 !default;
+$card-cap-bg: #222932 !default;
+$border-color: #2C333B !default;
+$input-bg:    #222932 !default;
+$input-color: #E6EAEE !default;
+$input-border-color: #3A434E !default;
+
+/*-- scss:rules --*/
+
+/* Only the tokens change. Every component and every SVG in custom.scss reads
+   these, so the charts repaint on toggle without being re-rendered.
+   Series steps are the dark-surface variants, validated separately against
+   this background rather than being a naive inversion of the light ones. */
+:root {
+  --chev: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%2396A0AB' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+
+  --page:      #14181C;
+  --card:      #1B2026;
+  --card-head: #222932;
+  --border:    #2C333B;
+  --border-strong: #3A434E;
+  --ink:       #E6EAEE;
+  --ink-2:     #C2CAD3;
+  --muted:     #96A0AB;
+  --faint:     #6E7883;
+  --grid:      #262D35;
+  --rule:      #7E8994;
+  --refline:   #3E4751;
+  --neutral:   #59636E;
+  --row-hover: #222A32;
+
+  /* lifted a step so they separate from the darker card behind them, still
+     deep enough for white text */
+  --vb0: #12718F;  --vb1: #A02A4C;  --vb2: #7A4FB5;  --vb3: #8E6A18;
+  --pill-on: #12718F;
+  --vb-flat: #222932;
+
+  --c0: #3AA0C8;  --c1: #D9536F;  --c2: #78A036;  --c3: #A279CE;  --c4: #D08A3F;
+  --c5: #4E9C8A;  --c6: #C071C6;  --c7: #7295C9;  --c8: #C4A33A;  --c9: #7CA455;
+}
+
+body { background: var(--page); color: var(--ink); }
+
+/* bootstrap surfaces that would otherwise stay light */
+.bslib-page-dashboard, .dashboard-page, main, .tab-content { background: var(--page); }
+.navbar { background: var(--card) !important; border-bottom-color: var(--border-strong); }
+.card, .bslib-card { background: var(--card); border-color: var(--border); }
+.card-header { background: var(--card-head); border-bottom-color: var(--border); }
+
+/* value boxes declared "light" must not stay white on a dark ground */
+.value-box.bg-light, .bslib-value-box.bg-light,
+.value-box .bg-light, .card.bg-light {
+  background-color: var(--card-head) !important;
+  color: var(--ink) !important;
+}
+.bg-light .value-box-value, .bg-light .value-box-title { color: var(--ink) !important; }
+
+/* the same ramp restepped against the dark card rather than inverted */
+:root {
+  --h0: #17303B; --h1: #1C4657; --h2: #236076; --h3: #2E7F9C;
+  --h4: #429EBE; --h5: #6DC0D8;
+  --heat-ink: #E6EAEE;
+}

@@ -1,0 +1,361 @@
+/*-- scss:defaults --*/
+$font-family-sans-serif: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif !default;
+$font-family-monospace: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace !default;
+$body-bg:    #FCFCFD !default;
+$body-color: #14181D !default;
+$primary:    #0E7FA8 !default;
+$danger:     #B02A50 !default;
+$success:    #5F8A1E !default;
+$warning:    #8A6410 !default;
+
+/*-- scss:rules --*/
+@import url('https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+/* One token set drives chrome and charts alike, so the dark theme only has to
+   redefine these and every SVG repaints without being re-rendered. */
+:root {
+  /* the chevron is a background image, so it cannot take currentColor; each
+     theme defines its own */
+  --chev: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%235C6672' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+
+  --page:      #FCFCFD;
+  --card:      #FFFFFF;
+  --card-head: #F4F6F8;
+  --border:    #E3E8ED;
+  --border-strong: #CBD3DB;
+  --ink:       #14181D;
+  --ink-2:     #3C4650;
+  --muted:     #5C6672;
+  --faint:     #8C959F;
+  --grid:      #E7EBEF;
+  --rule:      #9AA4AE;
+  --refline:   #C6CDD5;
+  --neutral:   #C3CBD3;
+  --row-hover: #F4F7F9;
+
+  /* Value-box fills are their own scale, chosen deep enough that white text
+     clears 4.5:1 on every one of them, in both themes. They are not the
+     series steps: a value box must not read as "series 1". */
+  --vb0: #0B6A8C;  --vb1: #8F2141;  --vb2: #66429B;  --vb3: #7A5A0E;
+  /* the selected pill carries white text, so it needs a step deep enough to
+     clear 4.5:1 rather than the series accent, which does not */
+  --pill-on: #0B6A8C;
+  --vb-flat: #F1F4F7;
+
+  --c0: #0E7FA8;  --c1: #B02A50;  --c2: #5F8A1E;  --c3: #7C52A8;  --c4: #B5651D;
+  --c5: #2F6F62;  --c6: #8A3B8F;  --c7: #4A6FA5;  --c8: #9A7B10;  --c9: #496B2E;
+}
+
+body { background: var(--page); color: var(--ink); }
+
+/* ---------- navbar ---------- */
+.navbar {
+  background: var(--card) !important;
+  border-bottom: 1px solid var(--border-strong);
+}
+.navbar-brand,
+.navbar .navbar-title { color: var(--ink) !important; font-weight: 700; letter-spacing: -.015em; }
+.navbar .navbar-subtitle { color: var(--muted) !important; }
+.navbar .nav-link {
+  color: var(--ink-2) !important;
+  background: transparent !important;      /* no filled chip behind the label */
+  font-size: .93rem; font-weight: 500;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+}
+.navbar .nav-link:hover { color: var(--c0) !important; }
+.navbar .nav-link.active {
+  color: var(--c0) !important;
+  background: transparent !important;
+  font-weight: 650;
+  border-bottom-color: var(--c0);
+}
+
+/* ---------- cards ---------- */
+.card, .bslib-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+.card-header {
+  font-weight: 650; font-size: .93rem; letter-spacing: -.004em;
+  background: var(--card-head); color: var(--ink);
+  border-bottom: 1px solid var(--border); padding: .5rem .8rem;
+}
+
+/* ---------- value boxes ---------- */
+/* Quarto turns an unrecognised valuebox colour into a bg- class, so the fill
+   is a token lookup and follows the theme toggle. White ink is safe on every
+   filled tone by construction; the flat tone keeps normal ink. */
+.bg-tone-0 { background: var(--vb0); } .bg-tone-1 { background: var(--vb1); }
+.bg-tone-2 { background: var(--vb2); } .bg-tone-3 { background: var(--vb3); }
+.bg-tone-flat { background: var(--vb-flat); }
+
+.bg-tone-0, .bg-tone-1, .bg-tone-2, .bg-tone-3 {
+  color: #FFFFFF; border-color: transparent;
+  .value-box-title, .value-box-value, .value-box-showcase, p { color: #FFFFFF; }
+}
+.bg-tone-flat {
+  color: var(--ink); border-color: var(--border);
+  .value-box-title, .value-box-value, p { color: var(--ink); }
+}
+
+.value-box-value {
+  font-size: clamp(1.1rem, 1.75vw, 1.95rem);
+  line-height: 1.12; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.value-box-area { min-width: 0; }
+.value-box-title { font-size: .82rem; font-weight: 500; opacity: .9; line-height: 1.3;
+  letter-spacing: -.002em; }
+.value-box-showcase { flex: 0 0 auto; .bi { opacity: .5; } }
+
+/* ---------- charts ---------- */
+.ojs-chart { width: 100%; height: auto; display: block; }
+.chart-wrap { width: 100%; position: relative; }
+.ojs-chart .ax  { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; fill: var(--muted); }
+.ojs-chart .axl { font-family: "Public Sans", sans-serif; font-size: 11px; fill: var(--muted); }
+.ojs-chart .ser { font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 600; }
+.ojs-chart .grid    { stroke: var(--grid); }
+.ojs-chart .rule    { stroke: var(--rule); }
+.ojs-chart .refline { stroke: var(--refline); }
+.ojs-chart .pt { cursor: crosshair; transition: r .08s; stroke: var(--card); }
+.ojs-chart .pt:hover { r: 8; fill-opacity: 1; }
+.ojs-chart circle { stroke: var(--card); }
+
+/* series identity: one class, used for stroke, fill and legend swatch alike */
+.sr0 { color: var(--c0); } .sr1 { color: var(--c1); } .sr2 { color: var(--c2); }
+.sr3 { color: var(--c3); } .sr4 { color: var(--c4); } .sr5 { color: var(--c5); }
+.sr6 { color: var(--c6); } .sr7 { color: var(--c7); } .sr8 { color: var(--c8); }
+.sr9 { color: var(--c9); } .neutral { color: var(--neutral); }
+
+.chart-note {
+  font-size: .78rem; color: var(--muted); line-height: 1.5;
+  padding: 7px 2px 0; margin-top: 6px; border-top: 1px solid var(--border);
+}
+.chart-note em { color: var(--ink-2); font-style: italic; }
+.chart-note strong { color: var(--ink); font-weight: 650; }
+.empty { color: var(--faint); font-size: .9rem; padding: 26px 4px; font-style: italic; }
+
+/* ---------- tables ---------- */
+table.dt { width: 100%; border-collapse: collapse; font-size: .83rem; }
+table.dt th {
+  text-align: left; font-size: .78rem; font-weight: 650; color: var(--ink-2);
+  padding: 7px 9px 6px; border-bottom: 2px solid var(--border-strong);
+  position: sticky; top: 0; background: var(--card);
+}
+table.dt td { padding: 5px 9px; border-bottom: 1px solid var(--border); color: var(--ink); }
+table.dt tr:hover td { background: var(--row-hover); }
+table.dt .r { text-align: right; font-variant-numeric: tabular-nums;
+  font-family: "IBM Plex Mono", monospace; }
+table.dt .b { font-weight: 700; }
+table.dt .k { font-family: "IBM Plex Mono", monospace; font-size: .78rem; color: var(--muted); }
+table.dt .w { color: var(--ink-2); }
+table.dt .m { color: var(--faint); }
+.neg { color: var(--c1); font-weight: 600; }
+.pos { color: var(--c0); font-weight: 600; }
+/* `table.dt td` is more specific than a bare `.neg`, so a cell that carries the
+   class directly needs the same weight to win it back */
+table.dt td.neg { color: var(--c1); font-weight: 600; }
+table.dt td.pos { color: var(--c0); font-weight: 600; }
+
+/* ---------- cursor popup ---------- */
+.ctip {
+  position: absolute; pointer-events: none; opacity: 0; z-index: 20;
+  background: var(--card); border: 1px solid var(--border-strong); border-radius: 6px;
+  padding: 7px 9px; min-width: 306px; max-width: 430px;
+  box-shadow: 0 2px 4px rgba(0,0,0,.06), 0 10px 26px -14px rgba(0,0,0,.35);
+  font-size: .78rem; transition: opacity .08s; color: var(--ink);
+}
+.ctip .ct-h {
+  font-size: .84rem; font-weight: 650; color: var(--ink); margin-bottom: 5px;
+  border-bottom: 1px solid var(--border); padding-bottom: 4px;
+}
+.ctip .ct-r { display: flex; align-items: baseline; gap: 10px; line-height: 1.55; }
+.ctip .ct-r i { width: 9px; height: 3px; border-radius: 2px; flex: none; }
+.ctip .ct-k { flex: 1 1 auto; min-width: 88px; color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* a value can be a long name, not just a figure: let it shrink and wrap rather
+   than run out of the bubble */
+.ctip .ct-v { font-family: "IBM Plex Mono", monospace; font-weight: 600; color: var(--ink);
+  font-variant-numeric: tabular-nums; flex: 0 1 auto; min-width: 0;
+  white-space: normal; overflow-wrap: anywhere; text-align: right; }
+.ctip .ct-ar { color: var(--faint); padding: 0 3px; font-style: normal; }
+.ctip .ct-more { color: var(--faint); font-size: .72rem; padding-top: 3px; font-style: italic; }
+
+/* OJS wraps every cell in a plain block that neither shrinks nor scrolls, so a
+   long table grew that wrapper to its full height and any percentage cap on the
+   scroller resolved against it. Making the wrapper a flex item lets the
+   scroller be the thing that shrinks. */
+.card-body .ojs-in-a-box-waiting-for-module-import,
+.card-body > .cell-output > .html-fill-item > div:not([class]) {
+  display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0;
+}
+.dt-scroll { overflow: auto; flex: 1 1 auto; min-height: 0; }
+table.dt tbody tr:nth-child(even) td { background: var(--row-hover); }
+
+/* Value boxes sit in a short row; the showcase icon must not crowd the number
+   out of the card. */
+.value-box-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; margin-bottom: .15rem; }
+
+
+/* bslib stacks the showcase above the text once a value box gets narrow, which
+   in a five-across row leaves no room for the number itself. It pins its own
+   grid areas ("top"/"bottom"), so rather than fight those names this drops the
+   grid for a row of flex items: icon beside text at every width. */
+.bslib-value-box .value-box-grid {
+  display: flex !important;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;   /* icon and figure read as one centred group */
+  gap: .6rem;
+}
+.bslib-value-box .value-box-showcase {
+  flex: 0 0 auto; width: auto; max-width: 54px; margin: 0; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+/* Quarto sizes the glyph from container WIDTH (18cqw), so a wide three-across
+   row gets a 72px icon that overflows its own box and crowds the number. Keying
+   it to height instead keeps it proportional to the box you can actually see.
+   Both need the .quarto-dashboard prefix to outrank the stock rule. */
+.quarto-dashboard .bslib-value-box .value-box-showcase .bi {
+  font-size: clamp(1.15rem, 26cqh, 2rem);
+  width: auto; height: auto; line-height: 1;
+}
+.quarto-dashboard .bslib-value-box .value-box-value {
+  font-size: clamp(1.05rem, min(13cqw, 34cqh), 2.05rem);
+}
+/* the text block does not stretch, so the group stays centred, but the title
+   and the number still align with each other rather than each centring alone */
+.bslib-value-box .value-box-area { flex: 0 1 auto; min-width: 0; padding: 0; }
+
+/* ---------- selector controls ----------
+   Observable Inputs ships browser defaults: a fixed label column, a native
+   select and a stacked column of radio dots. These read as a form, not as a
+   dashboard control, so the label becomes a quiet caption, the options become
+   pills that wrap, and the select picks up the same surface as everything else. */
+form[class*="oi-"] {
+  align-items: center;
+  gap: .55rem;
+  margin: 0;
+  /* Observable pins every form to 640px, which forces a pill row to wrap long
+     before the card runs out of width */
+  width: auto !important;
+  max-width: 100% !important;
+}
+form[class*="oi-"] > label {
+  width: auto !important; min-width: 0; margin: 0 .3rem 0 0;
+  font-size: .85rem; color: var(--muted); font-weight: 500;
+  white-space: nowrap;
+}
+
+/* radio and checkbox groups */
+form[class*="oi-"] > div {
+  display: flex; flex-wrap: wrap; gap: .3rem; align-items: center;
+}
+form[class*="oi-"] > div > label {
+  display: inline-flex; align-items: center;
+  padding: .26rem .66rem; margin: 0;
+  border: 1px solid var(--border-strong); border-radius: 999px;
+  background: var(--card); color: var(--ink-2);
+  font-size: .82rem; line-height: 1.35; white-space: nowrap; cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+}
+form[class*="oi-"] > div > label input { position: absolute; opacity: 0; width: 0; height: 0; }
+form[class*="oi-"] > div > label:hover { border-color: var(--c0); color: var(--c0); }
+form[class*="oi-"] > div > label:has(input:checked) {
+  background: var(--pill-on); border-color: var(--pill-on); color: #FFFFFF; font-weight: 600;
+}
+form[class*="oi-"] > div > label:has(input:focus-visible) {
+  outline: 2px solid var(--c0); outline-offset: 2px;
+}
+
+/* dropdowns */
+form[class*="oi-"] select {
+  appearance: none; -webkit-appearance: none;
+  background-color: var(--card);
+  background-image: var(--chev);
+  background-repeat: no-repeat;
+  background-position: right .55rem center;
+  background-size: 11px;
+  border: 1px solid var(--border-strong); border-radius: 7px;
+  padding: .3rem 1.9rem .3rem .62rem;
+  color: var(--ink); font-size: .85rem; font-family: inherit;
+  cursor: pointer; max-width: min(340px, 100%);
+  transition: border-color .12s;
+}
+form[class*="oi-"] select:hover { border-color: var(--c0); }
+form[class*="oi-"] select:focus-visible { outline: 2px solid var(--c0); outline-offset: 1px; }
+form[class*="oi-"] input[type="text"], form[class*="oi-"] input[type="search"] {
+  background: var(--card); color: var(--ink);
+  border: 1px solid var(--border-strong); border-radius: 7px;
+  padding: .3rem .62rem; font-size: .85rem;
+}
+
+/* A matrix encodes magnitude, which is a different colour job from series
+   identity: one hue, light to dark, never the categorical steps. */
+:root {
+  --h0: #E8F2F7; --h1: #C4DFEB; --h2: #97C8DB; --h3: #63AAC7;
+  --h4: #2F84AA; --h5: #0F5C7A;
+  --heat-ink: #14181D;
+}
+.hc0 { color: var(--h0); } .hc1 { color: var(--h1); } .hc2 { color: var(--h2); }
+.hc3 { color: var(--h3); } .hc4 { color: var(--h4); } .hc5 { color: var(--h5); }
+.ojs-chart .cellv { font-family: "IBM Plex Mono", monospace; font-size: 10px;
+  fill: var(--heat-ink); }
+.ojs-chart .cellv.on { fill: #FFFFFF; }
+
+.cb-prose { font-size: .86rem; line-height: 1.6; color: var(--ink-2); }
+.cb-prose { flex: 0 0 auto; margin-bottom: .7rem; }
+.cb-meta { flex: 0 0 auto; margin-top: .6rem; padding-top: .55rem;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: .8rem;
+  line-height: 1.5; }
+.cb-meta b { color: var(--ink); font-weight: 650; }
+.cb-prose b { color: var(--ink); }
+
+/* A table card with a closing line: the scroller takes the slack, the line does
+   not shrink. */
+.dt-box { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; height: 100%; }
+.dt-box > .dt-scroll { flex: 1 1 auto; min-height: 0; }
+.dt-box > .chart-note { flex: 0 0 auto; }
+
+/* the fill chain a self-sizing chart host depends on: every wrapper between the
+   card body and the chart has to pass its height down rather than shrink-wrap */
+/* A cell that carries prose, a footer line or a control row takes its natural
+   height. Without this every cell in a card grows equally, so a 40px control
+   row sharing a card with a chart claims half of it. */
+.card-body > .cell-output:has(.cb-prose),
+.card-body > .cell-output:has(.cb-meta),
+.card-body > .cell-output:has(form[class*="oi-"]):not(:has(.ojs-chart)):not(:has(table)) {
+  flex: 0 0 auto !important;
+}
+.card-body > .cell-output:has(.cb-prose) > *,
+.card-body > .cell-output:has(.cb-meta) > *,
+.card-body > .cell-output:has(form[class*="oi-"]):not(:has(.ojs-chart)):not(:has(table)) > * {
+  flex: 0 0 auto !important;
+}
+
+.card-body > .cell-output,
+.card-body > .cell-output > .html-fill-item,
+.card-body > .quarto-layout-panel,
+.card-body .quarto-layout-cell > .html-fill-item {
+  display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0;
+}
+
+/* Names, codes and figures never wrap: a wrapped office name triples a row's
+   height and makes a dense table unreadable. Prose columns opt back in. */
+table.dt td, table.dt th { white-space: nowrap; }
+table.dt td.prose { white-space: normal; min-width: 15rem; }
+
+/* A control row does not need a chart card's padding, and must not grow: inside
+   a ::: card each cell becomes its own .card-body flex item, so without this the
+   control claims an equal share of the card and starves the chart. */
+.card-body:has(form[class*="oi-"]):not(:has(.ojs-chart)):not(:has(table)) {
+  padding-top: .4rem; padding-bottom: .4rem;
+  flex: 0 0 auto !important;
+
+  /* Quarto's layout panel carries a 17px bottom margin meant for prose flow;
+     in a control-only card it is just dead space under the inputs. */
+  > .quarto-layout-panel { margin-bottom: 0; }
+}
