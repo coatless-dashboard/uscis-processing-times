@@ -31,6 +31,8 @@ jobs:
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      rendered: ${{ steps.panel.outputs.found }}
     steps:
       - uses: actions/checkout@v7
 
@@ -49,22 +51,33 @@ jobs:
             any::htmltools
       - uses: quarto-dev/quarto-actions/setup@v2
 
+      # Until the update workflow has run once there is no panel to render.
+      # That is a precondition, not a fault, so report it and stop rather than
+      # failing the run and leaving a red badge on a healthy repository.
       - name: Fetch the published panel
+        id: panel
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           mkdir -p panel
-          gh release download current --pattern "processing-times.db" --dir panel
-          ls -lh panel/
+          if gh release download current --pattern "processing-times.db" --dir panel 2>/dev/null; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            ls -lh panel/
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Nothing to render::No panel has been published yet. Run the Update workflow first; it creates the rolling current release this job reads."
+          fi
 
       - name: Render
+        if: steps.panel.outputs.found == 'true'
         env:
           # the panel carries the office dimension, so nothing else is needed
           USCIS_PANEL: ${{ github.workspace }}/panel/processing-times.db
         run: quarto render site/index.qmd --to dashboard
 
       - name: Fail if the build produced an empty dashboard
+        if: steps.panel.outputs.found == 'true'
         run: |
           set -euo pipefail
           test -s site/index.html
@@ -74,6 +87,7 @@ jobs:
           fi
 
       - name: Collect only the rendered output
+        if: steps.panel.outputs.found == 'true'
         run: |
           set -euo pipefail
           mkdir -p _publish
@@ -83,11 +97,15 @@ jobs:
           find _publish -name "*.qmd" -o -name ".Renviron" -o -name "*.scss" | tee /dev/stderr | grep -q . && exit 1 || true
 
       - uses: actions/upload-pages-artifact@v3
+        if: steps.panel.outputs.found == 'true'
         with:
           path: _publish
 
   deploy:
     needs: render
+    # Pages needs a public repository on a free plan, and there is nothing to
+    # deploy until a panel exists.
+    if: needs.render.outputs.rendered == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
