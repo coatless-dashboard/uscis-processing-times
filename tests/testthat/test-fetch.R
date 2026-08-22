@@ -35,6 +35,20 @@ test_that("releases carrying no asset are dropped rather than yielding NA rows",
   expect_equal(nrow(list_release_assets("owner/repo", gh_fn = fake_gh)), 0L)
 })
 
+# gh reads GITHUB_PAT and GITHUB_TOKEN, never GH_TOKEN. A workflow setting only
+# GH_TOKEN sent unauthenticated requests, which the API answers with a 403 that
+# reads as throttling rather than as a missing token.
+test_that("listing without a token stops before spending an unauthenticated request", {
+  local_mocked_bindings(gh_token = function(...) "", .package = "gh")
+  spent <- 0L
+  counting_gh <- function(...) { spent <<- spent + 1L; list() }
+  local_mocked_bindings(gh = counting_gh, .package = "gh")
+
+  expect_error(list_release_assets("owner/repo"), "GITHUB_PAT")
+  expect_error(list_all_tags("owner/repo"), "GITHUB_PAT")
+  expect_equal(spent, 0L)
+})
+
 test_that("validate_snapshot accepts a well-formed file and reports its era", {
   path <- withr::local_tempfile(fileext = ".db")
   make_fixture_db(path, era = "v0.5")

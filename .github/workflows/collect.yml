@@ -66,6 +66,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_RELEASES_REPO: ${{ secrets.SOURCE_RELEASES_REPO }}
           CHUNK_SIZE: ${{ inputs.chunk_size }}
+          # gh (the R package) reads GITHUB_PAT; GH_TOKEN is the CLI's variable
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
           BUDGET_MINUTES: ${{ inputs.budget_minutes }}
         run: Rscript tools/collect.R
 

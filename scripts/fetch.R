@@ -8,12 +8,28 @@
 # newest first, and the walk stops as soon as it reaches a tag already held.
 # A steady-state run therefore costs a single page, and a deeper archive
 # degrades to "the newest 1000" with a warning rather than an error.
+
+# The gh package resolves a token through gitcreds, which reads GITHUB_PAT and
+# GITHUB_TOKEN. It does not read GH_TOKEN -- that one belongs to the gh CLI. A
+# workflow that sets only GH_TOKEN leaves the R side unauthenticated, and an
+# unauthenticated caller gets 60 requests an hour against the runner's shared
+# public IP, which is exhausted long before the job starts. Failing here names
+# the cause; without it the first request comes back as a 403 rate limit and
+# reads like the archive is being throttled.
+gh_client <- function() {
+  if (!nzchar(gh::gh_token())) {
+    stop("no GitHub token: gh reads GITHUB_PAT or GITHUB_TOKEN, not GH_TOKEN",
+         call. = FALSE)
+  }
+  function(endpoint, ...) gh::gh(endpoint, ...)
+}
+
 API_RELEASE_PAGE <- 100L
 API_RELEASE_MAX_PAGES <- 10L   # 10 * 100 = the 1000-row ceiling
 
 list_release_assets <- function(repo = SOURCE_RELEASES_REPO, gh_fn = NULL,
                                 known_tags = character(0)) {
-  if (is.null(gh_fn)) gh_fn <- function(endpoint, ...) gh::gh(endpoint, ...)
+  if (is.null(gh_fn)) gh_fn <- gh_client()
   releases <- list()
   hit_ceiling <- TRUE
   for (page in seq_len(API_RELEASE_MAX_PAGES)) {
@@ -66,7 +82,7 @@ list_release_assets <- function(repo = SOURCE_RELEASES_REPO, gh_fn = NULL,
 # collected in chunks however deep it goes, without ever listing all releases.
 list_all_tags <- function(repo = SOURCE_RELEASES_REPO, gh_fn = NULL,
                           max_pages = 100L) {
-  if (is.null(gh_fn)) gh_fn <- function(endpoint, ...) gh::gh(endpoint, ...)
+  if (is.null(gh_fn)) gh_fn <- gh_client()
   tags <- character(0)
   for (page in seq_len(max_pages)) {
     batch <- gh_fn(paste0("GET /repos/", repo, "/tags"),
