@@ -267,11 +267,11 @@ bwnote <- data.frame(
                           "When an estimate is revised it can move backwards, so a cohort that",
                           "could call yesterday cannot today. Bars count keys moved backwards in",
                           "each month: %s moves across %s keys, landing on %s release days out of",
-                          "the whole archive. Hover a bar for that month's detail."),
+                          "the whole archive. Hover or tap a bar for that month's detail."),
                     fmt(S$bw_n), fmt(S$bw_keys), fmt(S$bw_days)),
   perform = sprintf(paste("Every form with at least %s recorded backslides, %s of them.",
                           "Bars are the mean days the inquiry date moved backwards per event.",
-                          "Hover a bar for the median and the worst single move."),
+                          "Hover or tap a bar for the median and the worst single move."),
                     BW_FLOOR, nrow(bwf)),
   stringsAsFactors = FALSE)
 
@@ -496,7 +496,7 @@ big_gap <- gaps[gaps$len >= GAP_LABEL_MIN, ]
 note4 <- data.frame(
   cover = sprintf(paste("Keys published on each day the feed was reachable. Shaded columns are",
                         "the %s days with no snapshot, in %s runs. The widest is %s days, across",
-                        "which the count fell from %s to %s. Hover one for what changed inside."),
+                        "which the count fell from %s to %s. Hover or tap one for what changed inside."),
                   S$absent, nrow(gaps), gaps$len[1],
                   fmt(gaps$before[1]), fmt(gaps$after[1])),
   stringsAsFactors = FALSE)
@@ -610,7 +610,7 @@ S3 <- list(
 note3 <- data.frame(
   waits = sprintf(paste("Every form, office and subtype USCIS is publishing today, %s in all,",
                         "grouped by the upper bound of its estimate. Half sit at or below %s",
-                        "months; the tail runs to %s months at %s. Hover a bar for the forms",
+                        "months; the tail runs to %s months at %s. Hover or tap a bar for the forms",
                         "inside it."),
                   fmt(nrow(livek)), S3$med_wait, S3$max_wait, S3$max_where),
   stringsAsFactors = FALSE)
@@ -808,6 +808,114 @@ nf = (v) => v == null ? "not recorded" : v.toLocaleString("en-US")
 
 plural = (v, w) => v == null ? "not recorded" : nf(v) + " " + w + (v === 1 ? "" : "s")
 
+// The stylesheet decides when the page stops being a fixed grid and becomes one
+// scrolling column, and publishes the answer as --compact. Reading it here means
+// the charts and the layout can never disagree about which mode they are in.
+isCompact = () =>
+  getComputedStyle(document.documentElement).getPropertyValue("--compact").trim() === "1"
+
+// Below this width a chart is on a phone, or in a card as narrow as one, and
+// trades its desktop margins and end-of-line labels for room to plot.
+NARROW = 480
+
+// A chart handed no height is in the scrolling layout and sizes itself from its
+// width: tall enough to read, short enough to share a sideways phone with its note.
+selfHeight = (w, ratio = 0.62, lo = 220, hi = 340) =>
+  Math.round(Math.max(lo, Math.min(hi, window.innerHeight * 0.72, w * ratio)))
+
+// The left margin a narrow chart needs: its widest tick label and no more.
+leftFor = (top, unit = "") => Math.max(30, (String(top) + unit).length * 6.5 + 12)
+
+// Fewer gridlines when there is no height to keep five of them apart.
+yFracs = (plot) => plot < 120 ? [0, .5, 1] : [0, .25, .5, .75, 1]
+
+// Which of a row of axis labels to draw. All of them when they fit. Otherwise
+// the shorter spellings, if any were offered, and then every nth of those, so
+// the survivors stay evenly spaced instead of colliding.
+axisLabels = function (full, pitch, short = full) {
+  const at = full.map((l, i) => l == null ? -1 : i).filter(i => i >= 0);
+  if (at.length < 2) return full;
+  const gap = Math.min(...at.slice(1).map((i, k) => i - at[k])) * pitch;
+  const need = set => Math.max(...at.map(i => String(set[i]).length)) * 6.5 + 8;
+  const set = need(full) <= gap ? full : short;
+  const step = Math.max(1, Math.ceil(need(set) / gap));
+  return full.map((_, i) => { const k = at.indexOf(i); return k < 0 || k % step ? null : set[i]; });
+}
+
+// Ties a drawn mark to the row it stands for, so one listener on the chart can
+// ask what is under the pointer instead of every mark carrying its own.
+mark = (el, d) => { el.__d = d; el.classList.add("mk"); return el; }
+
+under = function (ev, svg) {
+  let el = document.elementFromPoint(ev.clientX, ev.clientY);
+  while (el && el !== svg && el.__d === undefined) el = el.parentNode;
+  if (el && el !== svg) return el.__d;
+  if (ev.pointerType !== "touch") return undefined;
+  // a fingertip is wider than a dot: settle on the nearest mark within reach
+  let best, reach = 30 * 30;
+  for (const m of svg.querySelectorAll(".mk")) {
+    const b = m.getBoundingClientRect();
+    const d = (b.left + b.width / 2 - ev.clientX) ** 2 + (b.top + b.height / 2 - ev.clientY) ** 2;
+    if (d < reach) { reach = d; best = m; }
+  }
+  return best?.__d;
+}
+
+// One wiring for a cursor and a finger. A cursor hovers and then leaves. A
+// finger taps, or drags sideways, and then lifts, and the readout has to outlive
+// the lift to be read. A finger that drags up or down is scrolling the page, not
+// asking about the chart, so nothing is shown until the gesture proves otherwise.
+track = function (el, show, hide) {
+  let from = null;
+  el.addEventListener("pointerdown", ev => {
+    if (ev.pointerType === "touch") from = { x: ev.clientX, live: false };
+  });
+  el.addEventListener("pointermove", ev => {
+    if (ev.pointerType !== "touch") return show(ev);
+    if (!from) return;
+    if (!from.live && Math.abs(ev.clientX - from.x) < 6) return;
+    from.live = true;
+    show(ev);
+  });
+  el.addEventListener("pointerup", ev => {
+    if (ev.pointerType === "touch" && from) { from = null; show(ev); }
+  });
+  el.addEventListener("pointercancel", () => { from = null; });
+  el.addEventListener("pointerleave", ev => { if (ev.pointerType !== "touch") hide(); });
+  (el.ownerSVGElement ?? el).addEventListener("tipclear", hide);
+}
+
+// A readout a tap left floating over a chart closes when the next tap lands
+// somewhere else. One docked under its plot is part of the card and stays.
+tipClear = {
+  const clear = ev => {
+    if (ev.pointerType !== "touch") return;
+    for (const wrap of document.querySelectorAll(".chart-wrap"))
+      if (!wrap.contains(ev.target) && !wrap.querySelector(".ctip.docked"))
+        wrap.querySelector("svg.ojs-chart")?.dispatchEvent(new CustomEvent("tipclear"));
+  };
+  document.addEventListener("pointerdown", clear, true);
+  invalidation.then(() => document.removeEventListener("pointerdown", clear, true));
+}
+
+// On a narrow screen the page links are one row that scrolls sideways, so the
+// current page's link can start out of view. Bring it to the middle of the row.
+navFollow = {
+  const follow = () => {
+    const a = document.querySelector(".navbar .navbar-nav .nav-link.active");
+    const row = a?.closest(".navbar-nav");
+    if (row && row.scrollWidth > row.clientWidth)
+      row.scrollTo({ left: a.offsetLeft - (row.clientWidth - a.offsetWidth) / 2 });
+  };
+  document.addEventListener("shown.bs.tab", follow);
+  window.addEventListener("resize", follow);
+  follow();
+  invalidation.then(() => {
+    document.removeEventListener("shown.bs.tab", follow);
+    window.removeEventListener("resize", follow);
+  });
+}
+
 // Keeps the readout inside its card: it flips to the cursor's left only when
 // there is genuinely no room on the right, measured rather than guessed.
 // Quarto's OJS `width` is the page width, not the cell's, so a chart sized from
@@ -825,8 +933,18 @@ fitted = function (draw, opts = {}) {
   let lastW = 0, lastH = -1;
   const paint = () => {
     const w = Math.round(host.clientWidth);
-    const avail = Math.round(host.clientHeight);
     if (!w) return;
+    // In the scrolling layout nothing hands the host a height. Its box is only
+    // as tall as what was last drawn into it, so sizing from it shrinks the
+    // chart a little on every pass until it reaches the floor. There the chart
+    // is given no height and picks its own.
+    if (isCompact()) {
+      if (w === lastW && lastH === null) return;
+      lastW = w; lastH = null;
+      host.replaceChildren(draw(w, null));
+      return;
+    }
+    const avail = Math.round(host.clientHeight);
     if (w === lastW && avail === lastH) return;
     lastW = w; lastH = avail;
     if (!avail) { host.replaceChildren(draw(w, Math.round(w * fallbackRatio))); return; }
@@ -850,7 +968,17 @@ fitted = function (draw, opts = {}) {
   return host;
 }
 
+// A finger has no cursor to sit beside, and on a chart as narrow as a phone a
+// floating readout lands on the marks it describes. There it takes a place in
+// the card under the plot instead; the stylesheet does the rest.
+dockTip = function (tip, box) {
+  const dock = box.width < NARROW && isCompact() && matchMedia("(hover: none)").matches;
+  tip.classList.toggle("docked", dock);
+  return dock;
+}
+
 placeTip = function (tip, ev, box) {
+  if (dockTip(tip, box)) return;
   const x = ev.clientX - box.left, y = ev.clientY - box.top;
   const w = tip.offsetWidth || 300, h = tip.offsetHeight || 90;
   tip.style.left = (x + 18 + w <= box.width ? x + 18
@@ -865,14 +993,15 @@ gapChart = function (rows, gaps, opts = {}) {
   const { width = 1320, height = 300, note = "", yUnit = "" } = opts;
   if (!rows.length) return htl.html`<div class="empty">Nothing recorded.</div>`;
 
-  const W = width, H = height, M = { t: 26, r: 22, b: 34, l: 60 };
-  const idx = new Map(rows.map((r, i) => [r.d, i]));
-  const X = i => M.l + (i / (rows.length - 1)) * (W - M.l - M.r);
+  const W = width, H = height ?? selfHeight(W), narrow = W < NARROW;
   const vals = rows.map(r => r.n).filter(v => v != null);
   const yLo = Math.floor(Math.min(...vals) / 50) * 50;
   const yTop = niceTop(Math.max(...vals));
+  const M = { t: 26, r: narrow ? 10 : 22, b: 34, l: narrow ? leftFor(yTop, yUnit) : 60 };
+  const idx = new Map(rows.map((r, i) => [r.d, i]));
+  const X = i => M.l + (i / (rows.length - 1)) * (W - M.l - M.r);
   const Y = v => H - M.b - ((v - yLo) / (yTop - yLo)) * (H - M.t - M.b);
-  const ticks = [0, .25, .5, .75, 1].map(f => Math.round(yLo + (yTop - yLo) * f));
+  const ticks = yFracs(H - M.t - M.b).map(f => Math.round(yLo + (yTop - yLo) * f));
 
   // one path per unbroken run, so a missing day leaves a real hole in the line
   const paths = [];
@@ -886,21 +1015,23 @@ gapChart = function (rows, gaps, opts = {}) {
   if (open) paths.push(d);
 
   const tipEl = htl.html`<div class="ctip"></div>`;
-  const bands = gaps.map(g => {
+  // left to right, so a gap whose label would land on its neighbour's goes without
+  let lastLabel = -Infinity;
+  const bands = gaps.slice().sort((p, q) => p.start < q.start ? -1 : 1).map(g => {
     const a = idx.get(g.start), b2 = idx.get(g.end);
     if (a == null || b2 == null) return null;
     const w0 = Math.max(7, X(b2) - X(a));
     const cx = X(a) + w0 / 2;
-    return htl.svg`<g style="cursor:help"
-      onmouseenter=${ev => showGap(ev, g)} onmousemove=${ev => showGap(ev, g)}
-      onmouseleave=${() => { tipEl.style.opacity = 0; }}>
+    const room = cx - lastLabel >= 38;
+    if (room) lastLabel = cx;
+    return mark(htl.svg`<g style="cursor:help">
       <rect x=${X(a)} y=${M.t} width=${w0} height=${H - M.t - M.b}
         class="sr1" fill="currentColor" fill-opacity=".15"/>
       <line x1=${cx} x2=${cx} y1=${M.t} y2=${H - M.b} class="sr1" stroke="currentColor"
         stroke-width="1" stroke-dasharray="3 3" opacity=".65"/>
-      <text x=${cx} y=${M.t - 8} text-anchor="middle" class="ser sr1"
-        fill="currentColor">${g.len} d</text>
-    </g>`;
+      ${room ? htl.svg`<text x=${cx} y=${M.t - 8} text-anchor="middle" class="ser sr1"
+        fill="currentColor">${g.len} d</text>` : null}
+    </g>`, g);
   }).filter(Boolean);
 
   const years = rows.map((r, i) => ({ r, i })).filter(({ r }) => r.d.endsWith("-01-01"));
@@ -931,6 +1062,8 @@ gapChart = function (rows, gaps, opts = {}) {
     tipEl.style.opacity = 1;
     placeTip(tipEl, ev, svg.getBoundingClientRect());
   }
+  const hideGap = () => { tipEl.style.opacity = 0; };
+  track(svg, ev => { const g = under(ev, svg); g ? showGap(ev, g) : hideGap(); }, hideGap);
 
   return htl.html`<div class="chart-wrap">${svg}${tipEl}${
     note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
@@ -940,17 +1073,21 @@ gapChart = function (rows, gaps, opts = {}) {
 // one dataset, and every slot is drawn so gaps stay visible as gaps.
 colChart = function (rows, opts = {}) {
   const { width = 1320, height = 330, note = "", cls = "sr1", yLabel = "",
-          value = r => r.v, label = () => null, detail = () => [],
+          value = r => r.v, label = () => null, tick = label, detail = () => [],
           emptyAt = null } = opts;
   if (!rows.length) return htl.html`<div class="empty">Nothing recorded.</div>`;
 
-  const W = width, H = height, M = { t: 28, r: 22, b: 34, l: 66 };
+  const W = width, H = height ?? selfHeight(W), narrow = W < NARROW;
+  const yTop = niceTop(Math.max(...rows.map(value)));
+  const M = { t: 28, r: narrow ? 8 : 22, b: 34, l: narrow ? leftFor(yTop) : 66 };
   const band = (W - M.l - M.r) / rows.length;
   const bw = Math.max(3, band * 0.74);
   const X = i => M.l + band * i + (band - bw) / 2;
-  const yTop = niceTop(Math.max(...rows.map(value)));
   const Y = v => H - M.b - (v / yTop) * (H - M.t - M.b);
-  const ticks = [0, .25, .5, .75, 1].map(f => Math.round(yTop * f));
+  const ticks = yFracs(H - M.t - M.b).map(f => Math.round(yTop * f));
+  // `tick` is an optional shorter spelling of a label, used only when the full
+  // one would not fit under its column
+  const xl = axisLabels(rows.map(label), band, rows.map(tick));
 
   const bars = rows.map((r, i) => htl.svg`<rect x=${X(i)} y=${Y(value(r))} width=${bw}
       height=${Math.max(0, H - M.b - Y(value(r)))} class="${cls}" fill="currentColor"
@@ -962,9 +1099,9 @@ colChart = function (rows, opts = {}) {
       <line x1=${M.l} x2=${W - M.r} y1=${Y(t)} y2=${Y(t)} class="grid"/>
       <text x=${M.l - 8} y=${Y(t) + 4} text-anchor="end" class="ax">${t}</text></g>`)}
     <text x="2" y="11" class="axl">${yLabel}</text>
-    ${rows.map((r, i) => { const l = label(r); return l == null ? null
+    ${xl.map((l, i) => l == null ? null
       : htl.svg`<text x=${X(i) + bw / 2} y=${H - 12} text-anchor="middle"
-                 class="ax">${l}</text>`; })}
+                 class="ax">${l}</text>`)}
     ${bars}
   </svg>`;
 
@@ -972,7 +1109,7 @@ colChart = function (rows, opts = {}) {
                        height=${H - M.t - M.b} fill="transparent"/>`;
   svg.append(hit);
 
-  hit.onmousemove = ev => {
+  track(hit, ev => {
     const box = svg.getBoundingClientRect();
     const px = (ev.clientX - box.left) / box.width * W;
     const i = Math.max(0, Math.min(rows.length - 1, Math.floor((px - M.l) / band)));
@@ -985,11 +1122,10 @@ colChart = function (rows, opts = {}) {
           `<span class="ct-v">${v}</span></div>`).join(""));
     tipEl.style.opacity = 1;
     placeTip(tipEl, ev, box);
-  };
-  hit.onmouseleave = () => {
+  }, () => {
     bars.forEach(b2 => b2.setAttribute("fill-opacity", .82));
     tipEl.style.opacity = 0;
-  };
+  });
 
   return htl.html`<div class="chart-wrap">${svg}${tipEl}${
     note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
@@ -1026,7 +1162,7 @@ stripChart = function (rows, opts = {}) {
   const { width = 1320, height = 300, note = "", empty = "Nothing published for this selection." } = opts;
   if (!rows.length) return htl.html`<div class="empty">${empty}</div>`;
 
-  const W = width, H = height, M = { t: 40, r: 26, b: 46, l: 26 };
+  const W = width, H = height ?? selfHeight(W, .5, 210, 250), M = { t: 40, r: 26, b: 46, l: 26 };
   const vals = rows.flatMap(r => [r.lo, r.up]).filter(v => v != null);
   const hi = niceTop(Math.max(...vals));
   const X = v => M.l + (v / hi) * (W - M.l - M.r);
@@ -1045,13 +1181,11 @@ stripChart = function (rows, opts = {}) {
   const jitter = i => ((i * 37) % 11 - 5) * 2.1;
   const tipEl = htl.html`<div class="ctip"></div>`;
   const dotsU = rows.map((r, i) => r.up == null ? null :
-    htl.svg`<circle cx=${X(r.up)} cy=${laneU + jitter(i)} r="4.6" class="pt sr1"
-      fill="currentColor" fill-opacity=".62"
-      onmouseenter=${ev => show(ev, r)} onmousemove=${ev => show(ev, r)} />`);
+    mark(htl.svg`<circle cx=${X(r.up)} cy=${laneU + jitter(i)} r="4.6" class="pt sr1"
+      fill="currentColor" fill-opacity=".62"/>`, r));
   const dotsL = rows.map((r, i) => r.lo == null ? null :
-    htl.svg`<circle cx=${X(r.lo)} cy=${laneL + jitter(i)} r="4.6" class="pt sr0"
-      fill="currentColor" fill-opacity=".62"
-      onmouseenter=${ev => show(ev, r)} onmousemove=${ev => show(ev, r)} />`);
+    mark(htl.svg`<circle cx=${X(r.lo)} cy=${laneL + jitter(i)} r="4.6" class="pt sr0"
+      fill="currentColor" fill-opacity=".62"/>`, r));
 
   const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
     ${ticks.map(t => htl.svg`<g>
@@ -1081,7 +1215,8 @@ stripChart = function (rows, opts = {}) {
     tipEl.style.opacity = 1;
     placeTip(tipEl, ev, svg.getBoundingClientRect());
   }
-  svg.onmouseleave = () => { tipEl.style.opacity = 0; };
+  track(svg, ev => { const d = under(ev, svg); if (d) show(ev, d); },
+        () => { tipEl.style.opacity = 0; });
 
   return htl.html`<div class="chart-wrap">${svg}${tipEl}${
     note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
@@ -1095,15 +1230,33 @@ divergeChart = function (rows, opts = {}) {
           unit = " mo", detail = () => [] } = opts;
   if (!rows.length) return htl.html`<div class="empty">Nothing recorded.</div>`;
 
-  const W = width, H = height, M = { t: 22, r: 26, b: 34, l: 66 };
+  const W = width, H = height ?? selfHeight(W), narrow = W < NARROW;
   const mag = Math.max(...rows.map(r => Math.max(Math.abs(up(r)), Math.abs(down(r)))));
   const hi = niceTop(mag);
-  const mid = M.t + (H - M.t - M.b) / 2;
-  const Y = v => mid - (v / hi) * ((H - M.t - M.b) / 2);
-  const band = (W - M.l - M.r) / rows.length;
+  const side = { r: narrow ? 8 : 26, l: narrow ? leftFor(-hi) : 66 };
+  const band = (W - side.l - side.r) / rows.length;
   const bw = Math.min(Math.max(8, band * 0.5), 62);
-  const X = i => M.l + band * i + (band - bw) / 2;
-  const ticks = [-1, -.5, 0, .5, 1].map(f => Math.round(hi * f));
+  const X = i => side.l + band * i + (band - bw) / 2;
+
+  // Figures in full while a column is wide enough for them, in thousands when
+  // it is not, and left to the readout when even those would collide.
+  const full = v => (v > 0 ? "+" : "") + nf(v);
+  const brief = v => Math.abs(v) < 1000 ? full(v)
+    : (v > 0 ? "+" : "") + Math.round(v / 100) / 10 + "k";
+  const fig = [full, brief].find(f => band >= 6 + 6.8 *
+    Math.max(...rows.flatMap(r => [up(r), down(r), net(r)]).map(v => f(v).length)));
+
+  // with figures, the bottom margin holds two lines: the year, then its net
+  const M = { t: 22, b: fig ? 52 : 34, ...side };
+  const half = (H - M.t - M.b) / 2;
+  const mid = M.t + half;
+  // Each bar carries its figure just beyond its end. Drawn on the bar it would
+  // be the bar's own colour on itself, so the axis runs a little past the
+  // outermost gridline to leave the tallest bar room for one.
+  const ROOM = fig ? 17 : 0;
+  const Y = v => mid - (v / hi) * (half - ROOM);
+  const ticks = (half < 75 ? [-1, 0, 1] : [-1, -.5, 0, .5, 1]).map(f => Math.round(hi * f));
+  const xl = axisLabels(rows.map(label), band);
 
   const bars = rows.flatMap((r, i) => [
     htl.svg`<rect x=${X(i)} y=${Y(up(r))} width=${bw} height=${Math.max(0, mid - Y(up(r)))}
@@ -1119,20 +1272,25 @@ divergeChart = function (rows, opts = {}) {
     <line x1=${M.l} x2=${W - M.r} y1=${mid} y2=${mid} class="rule"/>
     <text x="2" y="11" class="axl">months added / removed</text>
     ${bars}
-    ${rows.map((r, i) => htl.svg`<text x=${X(i) + bw / 2} y=${H - 12}
-      text-anchor="middle" class="ax">${label(r)}</text>`)}
-    ${rows.map((r, i) => htl.svg`<g>
-      <line x1=${X(i) - 4} x2=${X(i) + bw + 4} y1=${Y(net(r))} y2=${Y(net(r))}
-        class="neutral" stroke="currentColor" stroke-width="2.5"/>
-      <text x=${X(i) + bw / 2} y=${Y(net(r)) + (net(r) >= 0 ? -7 : 15)}
-        text-anchor="middle" class="${"ser " + (net(r) > 0 ? "sr1" : "sr0")}"
-        fill="currentColor">${net(r) > 0 ? "+" : ""}${net(r)}</text></g>`)}
+    ${rows.map((r, i) => htl.svg`<line x1=${X(i) - 4} x2=${X(i) + bw + 4}
+      y1=${Y(net(r))} y2=${Y(net(r))} class="neutral" stroke="currentColor" stroke-width="2.5"/>`)}
+    ${xl.map((l, i) => l == null ? null : htl.svg`<text x=${X(i) + bw / 2}
+      y=${H - (fig ? 30 : 12)} text-anchor="middle" class="ax">${l}</text>`)}
+    ${fig ? htl.svg`<text x=${M.l - 8} y=${H - 10} text-anchor="end" class="axl">net</text>` : null}
+    ${fig ? rows.map((r, i) => htl.svg`<g>
+      <text x=${X(i) + bw / 2} y=${Y(up(r)) - 5} text-anchor="middle" class="ser sr1"
+        fill="currentColor">${fig(up(r))}</text>
+      <text x=${X(i) + bw / 2} y=${Y(down(r)) + 13} text-anchor="middle" class="ser sr0"
+        fill="currentColor">${fig(down(r))}</text>
+      <text x=${X(i) + bw / 2} y=${H - 10} text-anchor="middle"
+        class="${"ser " + (net(r) > 0 ? "sr1" : "sr0")}" fill="currentColor">${fig(net(r))}</text>
+    </g>`) : null}
   </svg>`;
 
   const hit = htl.svg`<rect x=${M.l} y=${M.t} width=${W - M.l - M.r}
     height=${H - M.t - M.b} fill="transparent"/>`;
   svg.append(hit);
-  hit.onmousemove = ev => {
+  track(hit, ev => {
     const box = svg.getBoundingClientRect();
     const i = Math.max(0, Math.min(rows.length - 1,
       Math.floor(((ev.clientX - box.left) / box.width * W - M.l) / band)));
@@ -1144,11 +1302,10 @@ divergeChart = function (rows, opts = {}) {
         `<span class="ct-k">${k}</span><span class="ct-v">${v}</span></div>`).join("");
     tipEl.style.opacity = 1;
     placeTip(tipEl, ev, box);
-  };
-  hit.onmouseleave = () => {
+  }, () => {
     bars.forEach(b2 => b2.setAttribute("fill-opacity", .8));
     tipEl.style.opacity = 0;
-  };
+  });
 
   return htl.html`<div class="chart-wrap">${svg}${tipEl}${
     note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
@@ -1168,9 +1325,17 @@ heatChart = function (rows, opts = {}) {
   // rank within the observed range, in six steps
   const step = v => Math.min(5, Math.max(0, Math.floor(((v - lo) / (hi - lo || 1)) * 5.999)));
 
-  const W = width, H = height, M = { t: 26, r: 14, b: 8, l: 46 };
-  const cw = (W - M.l - M.r) / colKeys.length;
+  const W = width, narrow = W < NARROW;
+  const side = narrow ? { l: 36, r: 4 } : { l: 46, r: 14 };
+  const cw = (W - side.l - side.r) / colKeys.length;
+  // a column's name turns on its side once it is wider than the column
+  const longest = Math.max(...colKeys.map(k => String(k).length)) * 6.5;
+  const turned = cw < longest + 6;
+  const M = { t: turned ? longest + 14 : 26, b: 8, ...side };
+  const H = height ?? M.t + M.b + rowKeys.length * 30;
   const ch = (H - M.t - M.b) / rowKeys.length;
+  // and a cell carries its figure only while the figure fits inside it
+  const figure = Math.max(...vals.map(v => String(v).length)) * 6.2 + 4;
   const at = new Map(rows.map(r => [row(r) + "|" + col(r), r]));
   const tipEl = htl.html`<div class="ctip"></div>`;
 
@@ -1180,24 +1345,23 @@ heatChart = function (rows, opts = {}) {
     if (!r || value(r) == null) return [];
     const y = M.t + ch * i + 1, h = Math.max(1, ch - 2);
     if (!split || value2 == null || value2(r) == null)
-      return [htl.svg`<rect x=${M.l + cw * j + 1} y=${y}
+      return [mark(htl.svg`<rect x=${M.l + cw * j + 1} y=${y}
         width=${Math.max(1, cw - 2)} height=${h} rx="2"
-        class="${"pt hc" + step(value(r))}" fill="currentColor"
-        onmouseenter=${ev => show(ev, r)} onmousemove=${ev => show(ev, r)} />`];
+        class="${"pt hc" + step(value(r))}" fill="currentColor"/>`, r)];
     // left half is the lower bound, right half the upper, on one shared scale
     return [
-      htl.svg`<rect x=${M.l + cw * j + 1} y=${y} width=${half} height=${h} rx="2"
-        class="${"pt hc" + step(value2(r))}" fill="currentColor"
-        onmouseenter=${ev => show(ev, r)} onmousemove=${ev => show(ev, r)} />`,
-      htl.svg`<rect x=${M.l + cw * j + 2 + half} y=${y} width=${half} height=${h} rx="2"
-        class="${"pt hc" + step(value(r))}" fill="currentColor"
-        onmouseenter=${ev => show(ev, r)} onmousemove=${ev => show(ev, r)} />`];
+      mark(htl.svg`<rect x=${M.l + cw * j + 1} y=${y} width=${half} height=${h} rx="2"
+        class="${"pt hc" + step(value2(r))}" fill="currentColor"/>`, r),
+      mark(htl.svg`<rect x=${M.l + cw * j + 2 + half} y=${y} width=${half} height=${h} rx="2"
+        class="${"pt hc" + step(value(r))}" fill="currentColor"/>`, r)];
   }));
   const labels = rowKeys.flatMap((rk, i) => colKeys.flatMap((ck, j) => {
     const r = at.get(rk + "|" + ck);
     if (!r || ch < 15 || value(r) == null) return [];
     const cy = M.t + ch * i + ch / 2 + 3.5;
-    if (!split || value2 == null || value2(r) == null)
+    const halved = split && value2 != null && value2(r) != null;
+    if ((halved ? half : cw) < figure) return [];
+    if (!halved)
       return [htl.svg`<text x=${M.l + cw * j + cw / 2} y=${cy} text-anchor="middle"
         class="${"cellv" + (step(value(r)) >= 4 ? " on" : "")}"
         pointer-events="none">${value(r)}</text>`];
@@ -1211,8 +1375,11 @@ heatChart = function (rows, opts = {}) {
   }));
 
   const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
-    ${colKeys.map((ck, j) => htl.svg`<text x=${M.l + cw * j + cw / 2} y=${M.t - 9}
-      text-anchor="middle" class="ax">${ck}</text>`)}
+    ${colKeys.map((ck, j) => { const x = M.l + cw * j + cw / 2;
+      return turned
+        ? htl.svg`<text x=${x} y=${M.t - 7} transform=${`rotate(-90 ${x} ${M.t - 7})`}
+            dominant-baseline="central" class="${cw < 13 ? "ax tight" : "ax"}">${ck}</text>`
+        : htl.svg`<text x=${x} y=${M.t - 9} text-anchor="middle" class="ax">${ck}</text>`; })}
     ${rowKeys.map((rk, i) => htl.svg`<text x=${M.l - 8} y=${M.t + ch * i + ch / 2 + 4}
       text-anchor="end" class="ax">${rk}</text>`)}
     ${cells.filter(Boolean)}${labels.filter(Boolean)}
@@ -1225,7 +1392,8 @@ heatChart = function (rows, opts = {}) {
     tipEl.style.opacity = 1;
     placeTip(tipEl, ev, svg.getBoundingClientRect());
   }
-  svg.onmouseleave = () => { tipEl.style.opacity = 0; };
+  track(svg, ev => { const d = under(ev, svg); if (d) show(ev, d); },
+        () => { tipEl.style.opacity = 0; });
 
   return htl.html`<div class="chart-wrap">${svg}${tipEl}${
     note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
@@ -1237,7 +1405,8 @@ scatterChart = function (pts, opts = {}) {
           unit = " mo", detail = () => [], colOf = () => "sr0" } = opts;
   if (!pts.length) return htl.html`<div class="empty">Nothing to compare.</div>`;
 
-  const W = width, H = height, M = { t: 14, r: 24, b: 42, l: 60 };
+  const W = width, H = height ?? selfHeight(W, .8, 240, 380), narrow = W < NARROW;
+  const M = { t: 14, r: narrow ? 12 : 24, b: 42, l: narrow ? 48 : 60 };
   const hi = niceTop(Math.max(...pts.flatMap(p => [p.x, p.y])));
   const X = v => M.l + (v / hi) * (W - M.l - M.r);
   const Y = v => H - M.b - (v / hi) * (H - M.t - M.b);
@@ -1255,9 +1424,8 @@ scatterChart = function (pts, opts = {}) {
     <text x=${(M.l + W - M.r) / 2} y=${H - 5} text-anchor="middle" class="axl">${xLabel}</text>
     <text transform="rotate(-90)" x=${-(M.t + H - M.b) / 2} y=15 text-anchor="middle"
       class="axl">${yLabel}</text>
-    ${pts.map(p => htl.svg`<circle cx=${X(p.x)} cy=${Y(p.y)} r="5" fill="currentColor"
-      fill-opacity=".62" stroke-width="1.4" class="${"pt " + colOf(p)}"
-      onmouseenter=${ev => show(ev, p)} onmousemove=${ev => show(ev, p)} />`)}
+    ${pts.map(p => mark(htl.svg`<circle cx=${X(p.x)} cy=${Y(p.y)} r="5" fill="currentColor"
+      fill-opacity=".62" stroke-width="1.4" class="${"pt " + colOf(p)}"/>`, p))}
   </svg>`;
 
   function show(ev, p) {
@@ -1268,7 +1436,8 @@ scatterChart = function (pts, opts = {}) {
     tipEl.style.opacity = 1;
     placeTip(tipEl, ev, svg.getBoundingClientRect());
   }
-  svg.onmouseleave = () => { tipEl.style.opacity = 0; };
+  track(svg, ev => { const d = under(ev, svg); if (d) show(ev, d); },
+        () => { tipEl.style.opacity = 0; });
 
   return htl.html`<div class="chart-wrap">${svg}${tipEl}${
     note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
@@ -1282,62 +1451,84 @@ rankChart = function (rows, opts = {}) {
           signed = false } = opts;
   if (!rows.length) return htl.html`<div class="empty">Nothing recorded.</div>`;
 
+  const W = width, T = 8, B = 24;
   const longest = Math.max(...rows.map(r => String(label(r)).length));
-  const M = { t: 8, r: 104, b: 24, l: Math.min(190, Math.max(64, longest * 6.4 + 14)) };
-  const W = width, H = height;
-  const rowH = (H - M.t - M.b) / rows.length;
+  const figure = r => (signed && value(r) > 0 ? "+" : "") + value(r) + unit;
+  const widest = Math.max(...rows.map(r => figure(r).length));
+  // a narrow column gives the names and the figures the room they need and no more
+  const sides = w => w < NARROW
+    ? { l: Math.min(w * .42, longest * 6.5 + 14), r: widest * 6.8 + 14 }
+    : { l: Math.min(190, Math.max(64, longest * 6.4 + 14)), r: 104 };
+
+  // Rows closer together than a line of type run their names into each other.
+  // A card too short to hold every row in one column wraps them into as many
+  // columns as its width allows, read down and then across. If that is still
+  // not enough the chart keeps its rows apart and the card scrolls instead.
+  const PITCH = 12.5;
+  const fit = height == null ? rows.length : Math.max(1, Math.floor((height - T - B) / PITCH));
+  let ncol = Math.max(1, Math.min(Math.ceil(rows.length / fit), Math.floor(W / 200)));
+  while (ncol > 1 && W / ncol - sides(W / ncol).l - sides(W / ncol).r < 70) ncol--;
+  const per = Math.ceil(rows.length / ncol);
+  const colW = W / ncol, narrow = colW < NARROW;
+  const M = { t: T, b: B, ...sides(colW) };
+  const H = height == null ? T + B + per * 22 : Math.max(height, T + B + per * PITCH);
+  const rowH = (H - M.t - M.b) / per;
   const bh = Math.min(rowH * 0.66, 22);
   // signed bars grow either side of a zero line; unsigned grow from the left
   const xTop = niceTop(Math.max(...rows.map(r => Math.abs(value(r)))));
-  const span = W - M.l - M.r;
-  const zero = signed ? M.l + span / 2 : M.l;
+  const span = colW - M.l - M.r;
   const L = v => (Math.abs(v) / xTop) * (signed ? span / 2 : span);
-  const Y = i => M.t + rowH * i + (rowH - bh) / 2;
+  // a row is placed within its column, then the column is shifted into place
+  const left = i => Math.floor(i / per) * colW;
+  const zero = i => left(i) + (signed ? M.l + span / 2 : M.l);
+  const Y = i => M.t + rowH * (i % per) + (rowH - bh) / 2;
   const ticks = signed ? [-1, -.5, 0, .5, 1].map(f => Math.round(xTop * f))
                        : [0, .25, .5, .75, 1].map(f => Math.round(xTop * f));
-  const tickX = t => signed ? zero + (t / xTop) * (span / 2) : M.l + L(t);
+  const tickX = t => signed ? M.l + span / 2 + (t / xTop) * (span / 2) : M.l + L(t);
+  const tl = axisLabels(ticks.map(t => t + unit), span / (ticks.length - 1));
   const clsOf = r => signed ? (value(r) > 0 ? "sr1" : "sr0") : cls;
 
   const bars = rows.map((r, i) => htl.svg`<rect
-      x=${signed && value(r) < 0 ? zero - L(value(r)) : zero} y=${Y(i)}
+      x=${signed && value(r) < 0 ? zero(i) - L(value(r)) : zero(i)} y=${Y(i)}
       width=${Math.max(1, L(value(r)))}
       height=${bh} rx="2" class="${clsOf(r)}" fill="currentColor" fill-opacity=".85"/>`);
   const tipEl = htl.html`<div class="ctip"></div>`;
 
   const svg = htl.svg`<svg viewBox="0 0 ${W} ${H}" class="ojs-chart">
-    ${ticks.map(t => htl.svg`<g>
-      <line x1=${tickX(t)} x2=${tickX(t)} y1=${M.t} y2=${H - M.b} class="grid"/>
-      <text x=${tickX(t)} y=${H - 8} text-anchor="middle" class="ax">${t}${unit}</text></g>`)}
+    ${Array.from({ length: ncol }, (_, c) => c * colW).flatMap(x0 => ticks.map((t, k) => htl.svg`<g>
+      <line x1=${x0 + tickX(t)} x2=${x0 + tickX(t)} y1=${M.t} y2=${H - M.b} class="grid"/>
+      ${tl[k] == null ? null : htl.svg`<text x=${x0 + tickX(t)} y=${H - 8} text-anchor="middle"
+        class="ax">${tl[k]}</text>`}</g>`))}
     ${bars}
-    ${rows.map((r, i) => htl.svg`<text x=${signed ? M.l - 10 : M.l - 10}
+    ${rows.map((r, i) => htl.svg`<text x=${left(i) + M.l - 10}
         y=${Y(i) + bh / 2 + 4} text-anchor="end" class="ax">${label(r)}</text>`)}
-    ${rows.map((r, i) => htl.svg`<text
-        x=${(signed && value(r) < 0 ? zero - L(value(r)) - 9 : zero + L(value(r)) + 9)}
-        y=${Y(i) + bh / 2 + 4}
-        text-anchor="${signed && value(r) < 0 ? "end" : "start"}"
-        class="${"ser " + clsOf(r)}" fill="currentColor">${
-          signed && value(r) > 0 ? "+" : ""}${value(r)}${unit}</text>`)}
+    ${rows.map((r, i) => {
+      const neg = signed && value(r) < 0;
+      // Beside a bar that runs left there is only the row's name to collide
+      // with, so a narrow column puts that figure on the clear side of zero.
+      const x = !neg ? zero(i) + L(value(r)) + 9 : narrow ? zero(i) + 7 : zero(i) - L(value(r)) - 9;
+      return htl.svg`<text x=${x} y=${Y(i) + bh / 2 + 4}
+        text-anchor="${neg && !narrow ? "end" : "start"}"
+        class="${"ser " + clsOf(r)}" fill="currentColor">${figure(r)}</text>`; })}
   </svg>`;
 
-  const hits = rows.map((r, i) => htl.svg`<rect x="0" y=${M.t + rowH * i}
-      width=${W} height=${rowH} fill="transparent"/>`);
-  hits.forEach(h => svg.append(h));
+  rows.forEach((r, i) => svg.append(mark(htl.svg`<rect x=${left(i)} y=${M.t + rowH * (i % per)}
+      width=${colW} height=${rowH} fill="transparent"/>`, i)));
 
-  hits.forEach((h, i) => {
-    h.onmousemove = ev => {
-      bars.forEach((bar, j) => bar.setAttribute("fill-opacity", j === i ? 1 : .3));
-      tipEl.innerHTML = `<div class="ct-h">${label(rows[i])}</div>` +
-        detail(rows[i]).map(([k, v]) =>
-          `<div class="ct-r"><span class="ct-k">${k}</span>` +
-          `<span class="ct-v">${v}</span></div>`).join("");
-      tipEl.style.opacity = 1;
-      placeTip(tipEl, ev, svg.getBoundingClientRect());
-    };
-  });
-  svg.onmouseleave = () => {
+  track(svg, ev => {
+    const i = under(ev, svg);
+    if (i === undefined) return;
+    bars.forEach((bar, j) => bar.setAttribute("fill-opacity", j === i ? 1 : .3));
+    tipEl.innerHTML = `<div class="ct-h">${label(rows[i])}</div>` +
+      detail(rows[i]).map(([k, v]) =>
+        `<div class="ct-r"><span class="ct-k">${k}</span>` +
+        `<span class="ct-v">${v}</span></div>`).join("");
+    tipEl.style.opacity = 1;
+    placeTip(tipEl, ev, svg.getBoundingClientRect());
+  }, () => {
     bars.forEach(bar => bar.setAttribute("fill-opacity", .85));
     tipEl.style.opacity = 0;
-  };
+  });
 
   return htl.html`<div class="chart-wrap">${svg}${tipEl}${
     note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
@@ -1351,14 +1542,15 @@ stackChart = function (rows, opts = {}) {
   if (!rows.length) return htl.html`<div class="empty">Nothing recorded.</div>`;
 
   const total = r => segments.reduce((a, seg) => a + (r[seg.key] ?? 0), 0);
-  const M = { t: 48, r: 22, b: 34, l: 60 };
-  const W = width, H = height;
+  const W = width, H = height ?? selfHeight(W), narrow = W < NARROW;
+  const yTop = niceTop(Math.max(...rows.map(total)));
+  const M = { t: 48, r: narrow ? 8 : 22, b: 34, l: narrow ? leftFor(yTop, yUnit) : 60 };
   const band = (W - M.l - M.r) / rows.length;
   const bw = Math.min(Math.max(6, band * 0.62), 74);
   const X = i => M.l + band * i + (band - bw) / 2;
-  const yTop = niceTop(Math.max(...rows.map(total)));
   const Y = v => H - M.b - (v / yTop) * (H - M.t - M.b);
-  const ticks = [0, .25, .5, .75, 1].map(f => Math.round(yTop * f));
+  const ticks = yFracs(H - M.t - M.b).map(f => Math.round(yTop * f));
+  const xl = axisLabels(rows.map(label), band);
 
   // one rect per segment, stacked from the baseline up
   const cols = rows.map((r, i) => {
@@ -1382,8 +1574,8 @@ stackChart = function (rows, opts = {}) {
         class="${seg.cls}" fill="currentColor" fill-opacity=".85"/>
       <text x=${W - M.r - 78 * (segments.length - k) + 14} y=${16}
         class="${"ser " + seg.cls}" fill="currentColor">${seg.name}</text></g>`)}
-    ${rows.map((r, i) => htl.svg`<text x=${X(i) + bw / 2} y=${H - 12}
-        text-anchor="middle" class="ax">${label(r)}</text>`)}
+    ${xl.map((l, i) => l == null ? null : htl.svg`<text x=${X(i) + bw / 2} y=${H - 12}
+        text-anchor="middle" class="ax">${l}</text>`)}
     ${cols.flat()}
     ${rows.map((r, i) => htl.svg`<text x=${X(i) + bw / 2} y=${Y(total(r)) - 6}
         text-anchor="middle" class="ax">${total(r)}</text>`)}
@@ -1392,7 +1584,7 @@ stackChart = function (rows, opts = {}) {
   const hit = htl.svg`<rect x=${M.l} y=${M.t} width=${W - M.l - M.r}
                        height=${H - M.t - M.b} fill="transparent"/>`;
   svg.append(hit);
-  hit.onmousemove = ev => {
+  track(hit, ev => {
     const box = svg.getBoundingClientRect();
     const px = (ev.clientX - box.left) / box.width * W;
     const i = Math.max(0, Math.min(rows.length - 1, Math.floor((px - M.l) / band)));
@@ -1404,11 +1596,10 @@ stackChart = function (rows, opts = {}) {
         `<span class="ct-k">${k}</span><span class="ct-v">${v}</span></div>`).join("");
     tipEl.style.opacity = 1;
     placeTip(tipEl, ev, box);
-  };
-  hit.onmouseleave = () => {
+  }, () => {
     cols.forEach(set => set.forEach(rect => rect.setAttribute("fill-opacity", .85)));
     tipEl.style.opacity = 0;
-  };
+  });
 
   return htl.html`<div class="chart-wrap">${svg}${tipEl}${
     note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
@@ -1425,12 +1616,19 @@ stepChart = function (rows, opts = {}) {
     (groups.get(b).at(-1).v ?? -1) - (groups.get(a).at(-1).v ?? -1));
   const labelled = keys.length <= maxLabels;
 
-  const W = width, H = height, M = { t: 12, r: labelled ? 190 : 26, b: 34, l: 62 };
+  const W = width, H = height ?? selfHeight(W), narrow = W < NARROW;
+  const yTop = niceTop(Math.max(...rows.map(r => r.v)));
+  // a narrow chart has no room to name each line at its end, so the names move
+  // to a key under the plot
+  const M = { t: 12, r: narrow ? 12 : labelled ? 190 : 26, b: 34,
+              l: narrow ? leftFor(yTop, yUnit) : 62 };
   const X = m => M.l + (months.length < 2 ? 0
               : months.indexOf(m) / (months.length - 1) * (W - M.l - M.r));
-  const yTop = niceTop(Math.max(...rows.map(r => r.v)));
   const Y = v => H - M.b - (v / yTop) * (H - M.t - M.b);
-  const ticks = [0, .25, .5, .75, 1].map(f => Math.round(yTop * f));
+  const ticks = yFracs(H - M.t - M.b).map(f => Math.round(yTop * f));
+  const jans = months.filter(m => m.endsWith("-01"));
+  const years = axisLabels(jans.map(m => m.slice(0, 4)),
+                           jans.length > 1 ? X(jans[1]) - X(jans[0]) : W);
   const colOf = k => SERIES_COLS[keys.indexOf(k) % SERIES_COLS.length];
   const sorted = k => groups.get(k).slice().sort((a, b) => a.ym < b.ym ? -1 : 1);
 
@@ -1468,8 +1666,8 @@ stepChart = function (rows, opts = {}) {
     ${ticks.map(t => htl.svg`<g>
       <line x1=${M.l} x2=${W - M.r} y1=${Y(t)} y2=${Y(t)} class="grid"/>
       <text x=${M.l - 8} y=${Y(t) + 4} text-anchor="end" class="ax">${t}${yUnit}</text></g>`)}
-    ${months.filter(m => m.endsWith("-01")).map(m =>
-      htl.svg`<text x=${X(m)} y=${H - 12} text-anchor="middle" class="ax">${m.slice(0, 4)}</text>`)}
+    ${jans.map((m, k) => years[k] == null ? null :
+      htl.svg`<text x=${X(m)} y=${H - 12} text-anchor="middle" class="ax">${years[k]}</text>`)}
     ${keys.map(k => {
       const pts = sorted(k);
       let d = "";
@@ -1478,7 +1676,7 @@ stepChart = function (rows, opts = {}) {
       return htl.svg`<path d=${d} fill="none" stroke="currentColor" stroke-width="2"
                       stroke-linejoin="round" opacity=".92" class="${"sr" + (keys.indexOf(k) % 10)}"/>`;
     })}
-    ${labelled ? keys.map(k => { const last = sorted(k).at(-1);
+    ${labelled && !narrow ? keys.map(k => { const last = sorted(k).at(-1);
       return htl.svg`<text x=${X(last.ym) + 9} y=${Y(last.v) + 4} fill="currentColor"
                       class="${"ser sr" + (keys.indexOf(k) % 10)}">${k} ${last.v}${yUnit}</text>`; }) : null}
     ${markRules}${rule}${dots}
@@ -1488,7 +1686,7 @@ stepChart = function (rows, opts = {}) {
                        height=${H - M.t - M.b} fill="transparent"/>`;
   svg.append(hit);
 
-  hit.onmousemove = ev => {
+  track(hit, ev => {
     const box = svg.getBoundingClientRect();
     const px = (ev.clientX - box.left) / box.width * W;
     const idx = Math.max(0, Math.min(months.length - 1,
@@ -1518,17 +1716,19 @@ stepChart = function (rows, opts = {}) {
         ? `<div class="ct-more">+${readout.length - (ms.length ? 6 : 10)} more</div>` : "") +
       evLine;
     tipEl.style.opacity = 1;
+    if (dockTip(tipEl, box)) return;
     const left = ev.clientX - box.left;
     tipEl.style.left = (left > box.width * .6 ? left - 252 : left + 18) + "px";
     tipEl.style.top = Math.max(4, ev.clientY - box.top - 30) + "px";
-  };
-  hit.onmouseleave = () => {
+  }, () => {
     rule.setAttribute("opacity", 0);
     dots.forEach(d => d.setAttribute("opacity", 0));
     tipEl.style.opacity = 0;
-  };
+  });
 
-  return htl.html`<div class="chart-wrap">${svg}${tipEl}${
+  const key = labelled && narrow ? htl.html`<div class="chart-key">${keys.map((k, i) =>
+    htl.html`<span class="${"sr" + (i % 10)}"><i></i>${k} ${sorted(k).at(-1).v}${yUnit}</span>`)}</div>` : null;
+  return htl.html`<div class="chart-wrap">${svg}${key}${tipEl}${
     note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
 }
 
@@ -1538,13 +1738,17 @@ bandChart = function (rows, opts = {}) {
   if (!pts.length) return htl.html`<div class="empty">Nothing published for this selection.</div>`;
 
   const months = pts.map(p => p.ym);
-  const W = width, H = height, M = { t: 14, r: 132, b: 34, l: 62 };
-  const X = m => M.l + (months.length < 2 ? 0
-              : months.indexOf(m) / (months.length - 1) * (W - M.l - M.r));
+  const W = width, H = height ?? selfHeight(W), narrow = W < NARROW;
   const vals = pts.flatMap(p => [p.lo, p.up]).filter(v => v != null);
   const yTop = niceTop(Math.max(...vals));
+  const M = { t: 14, r: narrow ? 12 : 132, b: 34, l: narrow ? leftFor(yTop, " mo") : 62 };
+  const X = m => M.l + (months.length < 2 ? 0
+              : months.indexOf(m) / (months.length - 1) * (W - M.l - M.r));
   const Y = v => H - M.b - (v / yTop) * (H - M.t - M.b);
-  const ticks = [0, .25, .5, .75, 1].map(f => Math.round(yTop * f));
+  const ticks = yFracs(H - M.t - M.b).map(f => Math.round(yTop * f));
+  const jans = months.filter(m => m.endsWith("-01"));
+  const years = axisLabels(jans.map(m => m.slice(0, 4)),
+                           jans.length > 1 ? X(jans[1]) - X(jans[0]) : W);
   const UP = "sr1", LO = "sr0";
 
   const both = pts.filter(p => p.lo != null && p.up != null);
@@ -1572,16 +1776,16 @@ bandChart = function (rows, opts = {}) {
     ${ticks.map(t => htl.svg`<g>
       <line x1=${M.l} x2=${W - M.r} y1=${Y(t)} y2=${Y(t)} class="grid"/>
       <text x=${M.l - 8} y=${Y(t) + 4} text-anchor="end" class="ax">${t} mo</text></g>`)}
-    ${months.filter(m => m.endsWith("-01")).map(m =>
-      htl.svg`<text x=${X(m)} y=${H - 12} text-anchor="middle" class="ax">${m.slice(0, 4)}</text>`)}
+    ${jans.map((m, k) => years[k] == null ? null :
+      htl.svg`<text x=${X(m)} y=${H - 12} text-anchor="middle" class="ax">${years[k]}</text>`)}
     ${band ? htl.svg`<path d=${band} class=${UP} fill="currentColor" fill-opacity=".10"/>` : null}
     <path d=${stepPath(p => p.up)} fill="none" stroke="currentColor" stroke-width="2.1"
           stroke-linejoin="round" class="${UP}"/>
     <path d=${stepPath(p => p.lo)} fill="none" stroke="currentColor" stroke-width="2.1"
           stroke-linejoin="round" class="${LO}"/>
-    ${last.up != null ? htl.svg`<text x=${X(last.ym) + 9} y=${Y(last.up) + 4} fill="currentColor"
+    ${!narrow && last.up != null ? htl.svg`<text x=${X(last.ym) + 9} y=${Y(last.up) + 4} fill="currentColor"
         class="${"ser " + UP}">upper ${last.up} mo</text>` : null}
-    ${last.lo != null ? htl.svg`<text x=${X(last.ym) + 9} y=${Y(last.lo) + 4} fill="currentColor"
+    ${!narrow && last.lo != null ? htl.svg`<text x=${X(last.ym) + 9} y=${Y(last.lo) + 4} fill="currentColor"
         class="${"ser " + LO}">lower ${last.lo} mo</text>` : null}
     ${marks.filter(m => months.includes(m.ym)).map(m => htl.svg`<g>
       <line x1=${X(m.ym)} x2=${X(m.ym)} y1=${M.t + 10} y2=${H - M.b}
@@ -1596,7 +1800,7 @@ bandChart = function (rows, opts = {}) {
   const hit = htl.svg`<rect x=${M.l} y=${M.t} width=${W - M.l - M.r}
                        height=${H - M.t - M.b} fill="transparent"/>`;
   svg.append(hit);
-  hit.onmousemove = ev => {
+  track(hit, ev => {
     const box = svg.getBoundingClientRect();
     const px = (ev.clientX - box.left) / box.width * W;
     const idx = Math.max(0, Math.min(months.length - 1,
@@ -1616,16 +1820,19 @@ bandChart = function (rows, opts = {}) {
       `<div class="ct-r"><i class="${LO}" style="background:currentColor"></i><span class="ct-k">lower bound</span>` +
       `<span class="ct-v">${p.lo == null ? "not published" : p.lo + " mo"}</span></div>` + gap;
     tipEl.style.opacity = 1;
+    if (dockTip(tipEl, box)) return;
     const left = ev.clientX - box.left;
     tipEl.style.left = (left > box.width * .6 ? left - 252 : left + 18) + "px";
     tipEl.style.top = Math.max(4, ev.clientY - box.top - 30) + "px";
-  };
-  hit.onmouseleave = () => {
+  }, () => {
     rule.setAttribute("opacity", 0);
     dU.setAttribute("opacity", 0); dL.setAttribute("opacity", 0);
     tipEl.style.opacity = 0;
-  };
-  return htl.html`<div class="chart-wrap">${svg}${tipEl}${
+  });
+  const key = !narrow ? null : htl.html`<div class="chart-key">${[
+    last.up != null ? htl.html`<span class=${UP}><i></i>upper ${last.up} mo</span>` : null,
+    last.lo != null ? htl.html`<span class=${LO}><i></i>lower ${last.lo} mo</span>` : null]}</div>`;
+  return htl.html`<div class="chart-wrap">${svg}${key}${tipEl}${
     note ? htl.html`<div class="chart-note">${note}</div>` : null}</div>`;
 }
 ```
@@ -1681,7 +1888,7 @@ fitted((w, h) => heatChart(HEATROWS, {
   note: `Mean ${pickHeat.toLowerCase()} in months, by form and year. \
 Reading down a column shows whether that form recovered or deteriorated. Darker is \
 ${pickHeat === "Span" ? "a wider gap between the two bounds" : "a longer wait"}, on a scale \
-set by the highest and lowest cell shown. Hover a cell for both bounds and the span.`,
+set by the highest and lowest cell shown. Hover or tap a cell for both bounds and the span.`,
   row: r => r.yr, col: r => r.form_name,
   value: r => pickHeat === "Lower bound" ? r.ml
             : pickHeat === "Span" ? r.sp : r.mu,
@@ -1792,7 +1999,7 @@ viewof pickMetric = Inputs.radio(["Upper bound", "Lower bound", "Span"],
         .filter(r => r.v != null);
   return fitted((w, h) => stepChart(series,
     { width: w, height: h, marks,
-      note: htl.html`Showing the ${pickMetric.toLowerCase()}. Hover anywhere to read every
+      note: htl.html`Showing the ${pickMetric.toLowerCase()}. Hover or tap anywhere to read every
         series at that month. Narrow to a single subtype <em>and</em> office to see both
         bounds together as a band.` }), { fallbackRatio: 0.24 });
 }
@@ -1879,8 +2086,9 @@ viewof pickBound = Inputs.radio(["Upper bound", "Lower bound", "Both bounds"],
       ? `${phrase(u, "upper")}. Anything above the dashed line got slower, in red, and anything below it got faster, in blue.`
       : `${phrase(l, "lower")}. The lower bound is the earlier percentile, so it moves when the quickest cases slow down. Red is slower, blue faster.`;
 
-  const draw = (W, H) => {
-    const M = {t: 14, r: 24, b: 42, l: 60};
+  const draw = (W, h) => {
+    const narrow = W < NARROW, H = h ?? selfHeight(W, .8, 240, 380);
+    const M = {t: 14, r: narrow ? 12 : 24, b: 42, l: narrow ? 48 : 60};
     const hi = niceTop(Math.max(...pts.flatMap(p => [p.x, p.y])));
     const X = v => M.l + (v/hi)*(W-M.l-M.r);
     const Y = v => H - M.b - (v/hi)*(H-M.t-M.b);
@@ -1904,12 +2112,9 @@ viewof pickBound = Inputs.radio(["Upper bound", "Lower bound", "Both bounds"],
         htl.svg`<g><circle cx=${W-M.r-72} cy=${M.t+9} r="5" class="sr0" fill="currentColor"
           fill-opacity=".72"/><text x=${W-M.r-61} y=${M.t+13} class="ser sr0"
           fill="currentColor">lower</text></g>`] : null}
-      ${pts.map(p => htl.svg`<circle cx=${X(p.x)} cy=${Y(p.y)} r="5.5"
+      ${pts.map(p => mark(htl.svg`<circle cx=${X(p.x)} cy=${Y(p.y)} r="5.5"
           fill="currentColor" fill-opacity=".72" stroke-width="1.6"
-          class="${"pt " + colOf(p)}"
-          onmouseenter=${ev => showPt(ev, p)}
-          onmousemove=${ev => showPt(ev, p)}
-          onmouseleave=${() => { tipEl.style.opacity = 0; }} />`)}
+          class="${"pt " + colOf(p)}"/>`, p))}
     </svg>`;
 
     // the readout always carries both bounds, whichever one was hovered, so the
@@ -1934,9 +2139,11 @@ viewof pickBound = Inputs.radio(["Upper bound", "Lower bound", "Both bounds"],
       tipEl.style.opacity = 1;
       placeTip(tipEl, ev, svg.getBoundingClientRect());
     }
+    const hidePt = () => { tipEl.style.opacity = 0; };
+    track(svg, ev => { const p = under(ev, svg); p ? showPt(ev, p) : hidePt(); }, hidePt);
 
     return htl.html`<div class="chart-wrap">${svg}${tipEl}
-      <div class="chart-note">${noteTxt} Hover a point for both bounds.</div></div>`;
+      <div class="chart-note">${noteTxt} Hover or tap a point for both bounds.</div></div>`;
   };
 
   return fitted(draw, { fallbackRatio: 0.42 });
@@ -2003,7 +2210,7 @@ viewof pickBound = Inputs.radio(["Upper bound", "Lower bound", "Both bounds"],
 //| title: "Waits USCIS is publishing today"
 fitted((w, h) => colChart(WAITROWS, {
   width: w, height: h, note: NOTE3.waits[0], yLabel: "keys published", cls: "sr0",
-  label: r => r.band,
+  label: r => r.band, tick: r => r.band.replace(" to ", "\u2013"),
   value: r => r.keys,
   detail: r => [["keys in this band", nf(r.keys)],
                 ["share of all live keys", r.pct + "%"],
@@ -2275,11 +2482,15 @@ viewof pickTable = Inputs.radio(CB_TABLES, { label: "Table", value: CB_TABLES[0]
 //| title: "Variables"
 {
   const rows = CBROWS.filter(r => r.tbl === pickTable);
+  // lets a long name break after an underscore without adding a character to
+  // it, so what is copied out of the cell is still the name
+  const breakable = name => name.split("_").flatMap((part, i, all) =>
+    i < all.length - 1 ? [part + "_", htl.html`<wbr>`] : [part]);
   return htl.html`<div class="dt-scroll"><table class="dt">
     <thead><tr><th>Variable</th><th>Type</th><th>Description</th>
       <th>Example</th><th class="r">Missing</th></tr></thead>
     <tbody>${rows.map(r => htl.html`<tr>
-      <td class="k">${r.name}</td>
+      <td class="k">${breakable(r.name)}</td>
       <td class="m">${r.type}</td>
       <td class="prose">${r.desc}</td>
       <td class="k">${r.example}</td>

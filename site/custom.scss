@@ -8,6 +8,18 @@ $danger:     #B02A50 !default;
 $success:    #5F8A1E !default;
 $warning:    #8A6410 !default;
 
+/* Two widths decide the small-screen behaviour. The page links, title and
+   buttons need about 1090px to share one line, so the navbar reflows below
+   that. The fixed grid of cards stops being readable sooner in one direction
+   than the other: under 992px wide its columns are too narrow, and under 600px
+   tall (a phone on its side) its rows are slivers. Either one switches the
+   page to a single scrolling column. */
+$nav-compact: "(max-width: 1099.98px)" !default;
+$compact:     "(max-width: 991.98px), (max-height: 599.98px)" !default;
+$phone:       "(max-width: 575.98px)" !default;
+/* the two at once: a reflowed navbar on a page that scrolls */
+$nav-scrolls: "(max-width: 991.98px), (max-width: 1099.98px) and (max-height: 599.98px)" !default;
+
 /*-- scss:rules --*/
 @import url('https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
@@ -115,6 +127,8 @@ body { background: var(--page); color: var(--ink); }
 .chart-wrap { width: 100%; position: relative; }
 .ojs-chart .ax  { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; fill: var(--muted); }
 .ojs-chart .axl { font-family: "Public Sans", sans-serif; font-size: 11px; fill: var(--muted); }
+/* axis names turned on their side over columns narrower than a line of type */
+.ojs-chart .ax.tight { font-size: 9.5px; }
 .ojs-chart .ser { font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 600; }
 .ojs-chart .grid    { stroke: var(--grid); }
 .ojs-chart .rule    { stroke: var(--rule); }
@@ -163,7 +177,7 @@ table.dt td.pos { color: var(--c0); font-weight: 600; }
 .ctip {
   position: absolute; pointer-events: none; opacity: 0; z-index: 20;
   background: var(--card); border: 1px solid var(--border-strong); border-radius: 6px;
-  padding: 7px 9px; min-width: 306px; max-width: 430px;
+  padding: 7px 9px; min-width: min(306px, 100%); max-width: 430px;
   box-shadow: 0 2px 4px rgba(0,0,0,.06), 0 10px 26px -14px rgba(0,0,0,.35);
   font-size: .78rem; transition: opacity .08s; color: var(--ink);
 }
@@ -404,3 +418,229 @@ table.dt td.prose { white-space: normal; min-width: 15rem; }
 .navbar .quarto-color-scheme-toggle.alternate:hover .bi::before {
   background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgZmlsbD0iIzBFN0ZBOCIgY2xhc3M9ImJpIGJpLXRvZ2dsZS1vbiIgdmlld0JveD0iMCAwIDE2IDE2Ij48cGF0aCBkPSJNNSAzYTUgNSAwIDAgMCAwIDEwaDZhNSA1IDAgMCAwIDAtMTBINXptNiA5YTQgNCAwIDEgMSAwLTggNCA0IDAgMCAxIDAgOHoiLz48L3N2Zz4=");
 }
+
+/* ---------- small screens ----------
+   Everything below reshapes the page for a phone or a tablet and leaves the
+   desktop grid alone. The chart code reads --compact rather than repeating the
+   breakpoint, so the layout and the charts cannot disagree about the mode. */
+:root { --compact: 0; }
+@media #{$compact} { :root { --compact: 1; } }
+
+/* One scrolling column. Quarto already does this under 576px, where it never
+   pins the page to the height of the screen and applies four rules of its own.
+   From the wider breakpoint the pin has to be released first, or the cards are
+   squeezed into one screen and clip; then come the same four rules. */
+@media #{$compact} {
+  body.quarto-dashboard { height: auto; }
+  .quarto-dashboard .bslib-page-fill { height: var(--bslib-page-fill-mobile-height, auto); }
+  .quarto-dashboard .page-layout-custom { min-height: 100vh; }
+  .quarto-dashboard .bslib-grid {
+    grid-template-columns: 1fr !important;
+    grid-template-rows: minmax(1em, max-content) !important;
+    height: var(--bslib-grid-height-mobile);
+  }
+  .quarto-dashboard .bslib-grid.grid {
+    height: unset !important;
+    grid-auto-rows: var(--bslib-grid--row-heights--xs, auto);
+  }
+
+  /* a full-width card on a narrow screen cannot spare a desktop gutter */
+  .quarto-dashboard .dashboard-page > .bslib-grid { padding: .7rem; }
+  .quarto-dashboard .bslib-grid { gap: .7rem; }
+  .quarto-dashboard .card { --bs-card-spacer-x: .7rem; --bs-card-spacer-y: .7rem; }
+  .quarto-dashboard .card-header { padding: .45rem .7rem; }
+}
+
+/* ---------- small screens: navbar ----------
+   Nine page links do not fit beside the title, and the stock answer is a menu
+   button, which hides eight of the nine pages behind a tap and was drawn in
+   near-white on this white navbar. The links become one row that scrolls
+   sideways under the title instead, so every page is one tap away. Quarto
+   styles its navbar through #quarto-dashboard-header, hence the prefix. */
+@media #{$nav-compact} {
+  .quarto-dashboard #quarto-dashboard-header { --nav-title-h: 3rem; }
+  .quarto-dashboard #quarto-dashboard-header .navbar {
+    .navbar-container { flex-wrap: wrap; padding: 0 .7rem; column-gap: .15rem; }
+    .navbar-toggler { display: none; }
+
+    .navbar-brand-container {
+      order: 1; flex: 1 1 0; min-width: 0;
+      height: var(--nav-title-h); margin: 0; padding: 0;
+    }
+    .navbar-title { flex-wrap: nowrap; flex-direction: column; align-items: flex-start;
+      min-width: 0; max-width: 100%; }
+    .navbar-title-text, .navbar-subtitle {
+      max-width: 100%; margin: 0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .navbar-subtitle { font-size: .8rem; line-height: 1.25; }
+
+    /* The wrapper holds both the page links and the two outbound links.
+       Dissolving it lets the buttons stay on the title row while the page
+       links take a row of their own. */
+    .navbar-collapse { display: contents !important; }
+    .quarto-dashboard-links { order: 2; padding: 0; }
+    a.quarto-color-scheme-toggle { order: 3; }
+
+    .navbar-nav {
+      order: 4; flex: 0 0 auto; width: calc(100% + 1.4rem); max-width: none;
+      margin: 0 -.7rem !important; padding: 0 .35rem;
+      flex-direction: row; flex-wrap: nowrap; align-self: auto;
+      max-height: none; overflow-x: auto; overflow-y: hidden;
+      overscroll-behavior-x: contain; scrollbar-width: none;
+      border-top: 1px solid var(--border);
+    }
+    .navbar-nav::-webkit-scrollbar { display: none; }
+    .navbar-nav .nav-item { flex: 0 0 auto; }
+    .navbar-nav .nav-link {
+      height: auto; min-height: 2.75rem; padding: 0 .7rem; white-space: nowrap;
+    }
+  }
+}
+
+/* On a page that scrolls, the links stay within reach: the header sticks, but
+   offset upward by the height of the title row, so only the links remain. */
+@media #{$nav-scrolls} {
+  .quarto-dashboard #quarto-dashboard-header {
+    position: sticky; top: calc(-1 * var(--nav-title-h)); z-index: 1030;
+  }
+}
+@media #{$phone} {
+  .quarto-dashboard #quarto-dashboard-header .navbar .navbar-subtitle { display: none; }
+}
+
+/* Where the page-link row runs past the edge, and where a table does, fade the
+   edge that still hides something. The scroll position drives the fade, so it
+   only appears on a row that really overflows and goes once the end is in
+   view. Browsers without scroll timelines simply get no fade. */
+@property --edge-fade { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@keyframes edge-fade { 0%, 94% { --edge-fade: 30px; } 100% { --edge-fade: 0px; } }
+@supports (animation-timeline: scroll()) {
+  @media #{$nav-compact} {
+    .quarto-dashboard #quarto-dashboard-header .navbar .navbar-nav {
+      animation: edge-fade linear both; animation-timeline: scroll(self inline);
+      mask-image: linear-gradient(to right, #000 calc(100% - var(--edge-fade)), transparent);
+    }
+  }
+  @media #{$compact} {
+    .dt-scroll {
+      animation: edge-fade linear both; animation-timeline: scroll(self inline);
+      mask-image: linear-gradient(to right, #000 calc(100% - var(--edge-fade)), transparent);
+    }
+  }
+}
+
+/* ---------- small screens: value boxes ---------- */
+@media #{$compact} {
+  /* all in one row again: the single-column rule above would stack them */
+  .quarto-dashboard .bslib-grid:has(> .bslib-value-box) {
+    grid-template-columns: none !important;
+    grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+  }
+  .bslib-value-box .value-box-grid { padding: .55rem .5rem; }
+  .bslib-value-box .value-box-title { -webkit-line-clamp: 3; }
+}
+/* five across on a tablet leaves no room for an icon beside the figure */
+@media (min-width: 576px) and (max-width: 991.98px) {
+  .bslib-value-box .value-box-showcase { display: none !important; }
+}
+/* on a phone, two to a row; an odd one out leads at full width */
+@media #{$phone} {
+  .quarto-dashboard .bslib-grid:has(> .bslib-value-box) {
+    grid-template-columns: 1fr 1fr !important; grid-auto-flow: row;
+  }
+  .quarto-dashboard .bslib-grid > .bslib-value-box:first-child:nth-last-child(odd) {
+    grid-column: 1 / -1;
+  }
+  .bslib-value-box .value-box-grid { justify-content: flex-start; padding-left: .8rem; }
+}
+
+/* ---------- small screens: controls ---------- */
+@media #{$compact} {
+  /* Quarto sizes each control as a share of the row. Stacked, that share
+     becomes a share of the height and leaves a blank band under the last one. */
+  .card-body .quarto-layout-row { flex-direction: row; flex-wrap: wrap; gap: .5rem 1rem; }
+  .card-body .quarto-layout-row > .quarto-layout-cell { flex: 1 1 16rem !important; }
+
+  /* Under 480px Observable stacks each label above its control and spaces the
+     pairs apart, which turns four filters into most of a screen. Label and
+     control share a line instead. Its sheet loads after this one, so the two
+     properties it also sets need the override. */
+  form[class*="oi-"] { width: 100% !important; flex-wrap: nowrap !important; margin: 0 !important; }
+  form[class*="oi-"] > label { flex: 0 0 auto; min-width: 3.9rem; padding: 0; }
+  form[class*="oi-"] select { flex: 1 1 0; width: auto !important; min-width: 0; max-width: none; }
+  form[class*="oi-"] > div { flex: 1 1 0; min-width: 0; }
+}
+@media #{$phone} {
+  form[class*="oi-"] > div > label { font-size: .8rem; }
+  /* a row of options needs the whole width, so its caption goes above it */
+  form[class*="oi-"][class*="-checkbox"] { flex-wrap: wrap !important; row-gap: .25rem; }
+  form[class*="oi-"][class*="-checkbox"] > label { flex: 0 0 100%; }
+}
+/* a fingertip needs more to aim at than a cursor does, whatever the screen */
+@media (pointer: coarse) {
+  form[class*="oi-"] select { min-height: 2.75rem; }
+  form[class*="oi-"] > div > label { min-height: 2.75rem; padding: 0 .7rem; }
+}
+/* three options have to fit one line of a phone */
+@media #{$phone} {
+  form[class*="oi-"] > div > label { padding: 0 .55rem; }
+}
+
+/* ---------- small screens: tables ---------- */
+@media #{$compact} {
+  /* A card no longer has a fixed height to scroll inside, so a ninety-row
+     table would run for several screens. It keeps its own scroller, capped. */
+  .dt-scroll { max-height: max(14rem, 62vh); }
+  @supports (height: 1svh) { .dt-scroll { max-height: max(14rem, 62svh); } }
+
+  /* the column that says what a row is stays put while the rest slide under it */
+  table.dt th { z-index: 2; }
+  table.dt th:first-child, table.dt td:first-child { position: sticky; left: 0; }
+  table.dt td:first-child { z-index: 1; background-color: var(--card); }
+  table.dt th:first-child { z-index: 3; }
+  /* Its edge is drawn rather than bordered or shadowed: a collapsed border does
+     not travel with a sticky cell, and Bootstrap already uses the cell's shadow
+     to paint the stripe on the tables R writes. */
+  table.dt th:first-child::after, table.dt td:first-child::after {
+    content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: 1px;
+    background: var(--border-strong);
+  }
+
+  /* a closing line written inside the scroller would slide away with the columns */
+  .dt-scroll > .chart-note { position: sticky; left: 0; }
+  table.dt td.prose { min-width: 12rem; }
+}
+@media #{$phone} {
+  table.dt { font-size: .8rem; }
+  table.dt th, table.dt td { padding-left: 7px; padding-right: 7px; }
+  /* A long office name would push every figure off the screen, and a pinned
+     column that wide would leave no screen for the rest to slide through. */
+  table.dt td.w, table.dt td:first-child {
+    max-width: 9.5rem; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* In a table that already wraps its prose, the name of the row wraps too
+     instead of losing its end. */
+  table.dt tr:has(td.prose) > td:first-child { white-space: normal; overflow-wrap: break-word; }
+  table.dt td.prose { min-width: 10.5rem; }
+}
+
+/* ---------- small screens: charts ---------- */
+/* a sideways drag reads along the chart; an up-and-down one still scrolls the page */
+@media (hover: none) {
+  .ojs-chart { touch-action: pan-y; -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; }
+}
+/* On a narrow touch screen a floating readout lands on the marks it describes,
+   so it takes a place in the card under the plot instead. */
+.ctip.docked {
+  position: static; opacity: 1 !important; transition: none;
+  min-width: 0; max-width: none; margin-top: 6px; box-shadow: none;
+}
+/* the labels a narrow chart cannot carry at the end of its lines */
+.chart-key {
+  display: flex; flex-wrap: wrap; gap: .1rem .9rem; padding: 5px 2px 0;
+  font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 600;
+}
+.chart-key span { display: inline-flex; align-items: center; gap: .35rem; }
+.chart-key i { width: 10px; height: 3px; border-radius: 2px; background: currentColor; flex: none; }
